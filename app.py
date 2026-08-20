@@ -9,6 +9,8 @@ from bs4 import BeautifulSoup
 import streamlit as st
 
 DOWNLOAD_DIR = "igc_downloads"
+USER_AGENT = "Mozilla/5.0"
+DOWNLOAD_ACCEPT = "application/vnd.flight+igc,application/octet-stream,*/*"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 st.set_page_config(page_title="Soaring IGC Downloader", layout="wide")
@@ -40,6 +42,51 @@ def save_stream(r, out_dir):
             if chunk:
                 fh.write(chunk)
     return path
+
+
+def fetch_url_for_download(link: str) -> str:
+    if '/download-contest-flight/' in link and 'dl=' not in link:
+        return link + ('&dl=1' if '?' in link else '?dl=1')
+    return link
+
+
+def is_download_response_ok(r, fetch_url: str) -> bool:
+    ctype = r.headers.get('content-type', '').lower()
+    return r.status_code == 200 and (
+        '.igc' in ctype
+        or 'flight' in ctype
+        or 'content-disposition' in r.headers
+        or fetch_url.lower().endswith('.igc')
+    )
+
+
+def status_label(r) -> str:
+    ctype = r.headers.get('content-type', '').lower()
+    return f"skip {r.status_code}|{ctype}"
+
+
+def extract_daily_links_from_class_html(html_text: str, base: str):
+    cls_soup = BeautifulSoup(html_text, 'html.parser')
+    found_daily = []
+    for a in cls_soup.find_all('a', href=True):
+        href = a['href']
+        # Match daily results or task pages: /daily, /task-, task-X-on-YYYY-MM-DD patterns
+        if any(pat in href.lower() for pat in ['/daily', 'task-', '/task/']):
+            found_daily.append(href if href.startswith('http') else urljoin(base, href))
+    return list(dict.fromkeys(found_daily))
+
+
+def dedupe_contest_links(all_links):
+    seen = set()
+    final = []
+    for link, c_name, cls_name, day in all_links:
+        # dedupe by canonical URL and by explicit task date to avoid repeated daily folders
+        key = (canonical_url(link), str(day))
+        if key in seen:
+            continue
+        seen.add(key)
+        final.append((link, c_name, cls_name, day))
+    return final
 
 
 def find_candidates(html, base):
@@ -180,7 +227,7 @@ if contest_mode:
         st.info('Enter a valid SoaringSpot contest URL to discover classes.')
     else:
         sess = requests.Session()
-        sess.headers.update({'User-Agent': 'Mozilla/5.0'})
+        sess.headers.update({'User-Agent': USER_AGENT})
         try:
             resp = sess.get(url, timeout=15)
             resp.raise_for_status()
@@ -220,14 +267,7 @@ if contest_mode:
                             st.write(f"URL: `{cls_url}`")
                             try:
                                 cr = sess.get(cls_url, timeout=12); cr.raise_for_status()
-                                cls_soup = BeautifulSoup(cr.text, 'html.parser')
-                                found_daily = []
-                                for a in cls_soup.find_all('a', href=True):
-                                    href = a['href']
-                                    # Match daily results or task pages: /daily, /task-, task-X-on-YYYY-MM-DD patterns
-                                    if any(pat in href.lower() for pat in ['/daily', 'task-', '/task/']):
-                                        found_daily.append(href if href.startswith('http') else urljoin(base, href))
-                                found_daily = list(dict.fromkeys(found_daily))
+                                found_daily = extract_daily_links_from_class_html(cr.text, base)
                                 st.info(f"Found **{len(found_daily)}** daily page links for {name}")
                                 for dl in found_daily[:3]:  # Show first 3
                                     st.write(f"  - {dl[-80:]}")
@@ -250,12 +290,7 @@ if contest_mode:
                                 continue
 
                     # dedupe and download
-                    seen = set(); final = []
-                    for link, c_name, cls_name, day in all_links:
-                        # dedupe by canonical URL and by explicit task date to avoid repeated daily folders
-                        key = (canonical_url(link), str(day))
-                        if key in seen: continue
-                        seen.add(key); final.append((link, c_name, cls_name, day))
+                    final = dedupe_contest_links(all_links)
 
                     # Count unique days
                     by_day = {}
@@ -272,21 +307,18 @@ if contest_mode:
                     prog = st.progress(0); rows = []
                     for i, (link, c_name, cls_name, day) in enumerate(final, 1):
                         st.write(f"**{i}/{len(final)}** Day: `{day}` | Link: {link[-50:]}")
-                        fetch = link
-                        if '/download-contest-flight/' in link and 'dl=' not in link:
-                            fetch = link + ('&dl=1' if '?' in link else '?dl=1')
+                        fetch = fetch_url_for_download(link)
                         try:
-                            hdrs = sess.headers.copy(); hdrs.update({'Referer': url, 'Accept': 'application/vnd.flight+igc,application/octet-stream,*/*'})
+                            hdrs = sess.headers.copy(); hdrs.update({'Referer': url, 'Accept': DOWNLOAD_ACCEPT})
                             r = sess.get(fetch, stream=True, timeout=30, headers=hdrs)
-                            ctype = r.headers.get('content-type','').lower()
-                            if r.status_code==200 and ('.igc' in ctype or 'flight' in ctype or 'content-disposition' in r.headers or fetch.lower().endswith('.igc')):
+                            if is_download_response_ok(r, fetch):
                                 out_dir = os.path.join(DOWNLOAD_DIR, sanitize(c_name), sanitize(cls_name), sanitize(str(day)))
                                 path = save_stream(r, out_dir)
                                 rows.append((link,'ok',path))
                                 st.success(f"✓ Saved to {out_dir}")
                             else:
-                                rows.append((link,f'skip {r.status_code}|{ctype}',None))
-                                st.warning(f"✗ Skipped: {r.status_code} | {ctype[:30]}")
+                                rows.append((link, status_label(r), None))
+                                st.warning(f"✗ Skipped: {r.status_code} | {r.headers.get('content-type', '')[:30]}")
                         except Exception as e:
                             rows.append((link,f'err {e}',None))
                             st.error(f"✗ Error: {str(e)[:80]}")
@@ -303,7 +335,7 @@ if download and not contest_mode:
         st.stop()
 
     sess = requests.Session()
-    sess.headers.update({'User-Agent': 'Mozilla/5.0'})
+    sess.headers.update({'User-Agent': USER_AGENT})
     try:
         resp = sess.get(url, timeout=15)
         resp.raise_for_status()
@@ -322,18 +354,15 @@ if download and not contest_mode:
         prog = st.progress(0)
         results = []
         for i, link in enumerate(cand, 1):
-            fetch = link
-            if '/download-contest-flight/' in link and 'dl=' not in link:
-                fetch = link + ('&dl=1' if '?' in link else '?dl=1')
+            fetch = fetch_url_for_download(link)
             try:
-                hdrs = sess.headers.copy(); hdrs.update({'Referer': url, 'Accept': 'application/vnd.flight+igc,application/octet-stream,*/*'})
+                hdrs = sess.headers.copy(); hdrs.update({'Referer': url, 'Accept': DOWNLOAD_ACCEPT})
                 r = sess.get(fetch, timeout=30, stream=True, headers=hdrs)
-                ctype = r.headers.get('content-type', '').lower()
-                if r.status_code == 200 and ('.igc' in ctype or 'flight' in ctype or 'content-disposition' in r.headers or fetch.lower().endswith('.igc')):
+                if is_download_response_ok(r, fetch):
                     path = save_stream(r, DOWNLOAD_DIR)
                     results.append((link, 'ok', path))
                 else:
-                    results.append((link, f'skip {r.status_code}|{ctype}', None))
+                    results.append((link, status_label(r), None))
             except Exception as e:
                 results.append((link, f'err {e}', None))
             prog.progress(int(i / len(cand) * 100))
