@@ -89,6 +89,80 @@ def dedupe_contest_links(all_links):
     return final
 
 
+def infer_class_pages_from_task_links(html_text: str, base: str):
+    s = BeautifulSoup(html_text, "html.parser")
+    out = []
+    seen = set()
+    for a in s.find_all("a", href=True):
+        href = (a.get("href") or "").strip()
+        if not href:
+            continue
+        abs_url = href if href.startswith('http') else urljoin(base, href)
+        p = urlparse(abs_url)
+        parts = [seg for seg in p.path.split('/') if seg]
+        if 'tasks' not in parts:
+            continue
+        idx = parts.index('tasks')
+        if idx + 1 >= len(parts):
+            continue
+        class_slug = parts[idx + 1]
+        prefix = parts[:idx]
+        class_path = '/' + '/'.join(prefix + ['results', class_slug])
+        class_url = urlunparse((p.scheme, p.netloc, class_path, '', '', ''))
+        class_name = sanitize(class_slug.replace('-', ' ').title())
+        if class_url in seen:
+            continue
+        seen.add(class_url)
+        out.append((class_name, class_url))
+    return out
+
+
+def discover_class_pages(contest_html: str, contest_url: str, base: str, sess):
+    # Primary discovery from contest page itself.
+    class_pages = find_class_pages_from_contest(contest_html, base)
+    if class_pages:
+        return class_pages
+
+    # Fallback: fetch a generic /results page when contest home doesn't expose class links.
+    results_candidates = [urljoin(contest_url.rstrip('/') + '/', 'results')]
+    s = BeautifulSoup(contest_html, "html.parser")
+    for a in s.find_all("a", href=True):
+        href = (a.get('href') or '').strip()
+        if not href:
+            continue
+        if re.search(r'/results(?:[/?#]|$)', href.lower()):
+            abs_url = href if href.startswith('http') else urljoin(base, href)
+            results_candidates.append(abs_url)
+
+    seen_results = set()
+    fallback_pages = []
+    for r_url in results_candidates:
+        if r_url in seen_results:
+            continue
+        seen_results.add(r_url)
+        try:
+            rr = sess.get(r_url, timeout=15)
+            rr.raise_for_status()
+            fallback_pages.extend(find_class_pages_from_contest(rr.text, base))
+            if not fallback_pages:
+                fallback_pages.extend(infer_class_pages_from_task_links(rr.text, base))
+        except Exception:
+            continue
+
+    if fallback_pages:
+        dedup = []
+        seen_urls = set()
+        for n, u in fallback_pages:
+            if u in seen_urls:
+                continue
+            seen_urls.add(u)
+            dedup.append((n, u))
+        return dedup
+
+    # Last resort: infer from task links on the contest home page.
+    return infer_class_pages_from_task_links(contest_html, base)
+
+
 def find_candidates(html, base):
     s = BeautifulSoup(html, "html.parser")
     candidates = set()
@@ -129,11 +203,22 @@ def find_class_pages_from_contest(html, base):
         text = (a.get_text() or "").strip()
         if not href:
             continue
-        # Match class result pages but exclude daily task pages
-        if any(p in href for p in ("/classes/", "/results/", "/class/")) and not ('/task-' in href and '/daily' in href):
-            cls_name = text or href.split('/')[-1]
-            url_abs = href if href.startswith('http') else urljoin(base, href)
-            classes.append((sanitize(cls_name), url_abs))
+        url_abs = href if href.startswith('http') else urljoin(base, href)
+        path_parts = [seg for seg in urlparse(url_abs).path.split('/') if seg]
+
+        cls_slug = None
+        for marker in ('results', 'classes', 'class'):
+            if marker in path_parts:
+                idx = path_parts.index(marker)
+                tail = path_parts[idx + 1:]
+                # Only accept base class pages, e.g. /results/standard
+                if len(tail) == 1:
+                    cls_slug = tail[0]
+                break
+
+        if cls_slug:
+            cls_name = sanitize(text or cls_slug.replace('-', ' ').title())
+            classes.append((cls_name, url_abs))
     # dedupe by URL, preserving first occurrence
     seen = set(); out = []
     for n, u in classes:
@@ -242,8 +327,8 @@ if contest_mode:
             html_classes = {}
             class_names = []
 
-            # Discover classes from HTML
-            class_pages = find_class_pages_from_contest(resp.text, base)
+            # Discover classes from contest page with fallbacks for competitions that only expose /results.
+            class_pages = discover_class_pages(resp.text, url, base, sess)
             for n, u in class_pages:
                 class_names.append(n)
                 html_classes[n] = u
