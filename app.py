@@ -1,6 +1,7 @@
 import os
 import re
 import time
+from html import unescape
 from urllib.parse import urljoin, urlparse, parse_qsl, urlencode, urlunparse
 
 import requests
@@ -16,10 +17,6 @@ st.markdown("Paste a SoaringSpot page URL. Only explicit .igc and download endpo
 
 url = st.text_input("SoaringSpot URL", "https://www.soaringspot.com/en_gb/...")
 contest_mode = st.checkbox("Download entire contest (classes & days)")
-use_api = st.checkbox("Use SoaringSpot API when available")
-api_token = None
-if use_api:
-    api_token = st.text_input("API token (optional)")
 download = st.button("Download IGCs")
 
 
@@ -48,20 +45,32 @@ def save_stream(r, out_dir):
 def find_candidates(html, base):
     s = BeautifulSoup(html, "html.parser")
     candidates = set()
+
+    def add_candidate(raw):
+        if not raw:
+            return
+        decoded = unescape(str(raw)).strip()
+        for m in re.findall(r'https?://[^\s\"\']+|/[^\s\"\']+', decoded):
+            lower = m.lower()
+            if lower.endswith('.igc') or 'download-contest-flight' in lower or 'download-flight' in lower or '/download/' in lower:
+                candidates.add(m if m.startswith('http') else urljoin(base, m))
+
     for a in s.find_all("a", href=True):
         href = a["href"].strip()
-        if not href:
-            continue
-        lower = href.lower()
-        if lower.endswith(".igc") or "download-contest-flight" in lower or "download-flight" in lower or "/download/" in lower:
-            candidates.add(href if href.startswith("http") else urljoin(base, href))
-    # scan attributes for embedded href fragments (menu popups etc)
+        add_candidate(href)
+
+    # scan attributes for embedded href fragments, popover data-content, JSON blobs, etc.
     for tag in s.find_all(True):
         for val in tag.attrs.values():
             txt = " ".join(val) if isinstance(val, (list, tuple)) else str(val)
-            for m in re.findall(r'href=["\']([^"\']+)["\']', txt):
-                if any(k in m.lower() for k in ('.igc', 'download-contest-flight', 'download-flight', '/download/')):
-                    candidates.add(m if m.startswith('http') else urljoin(base, m))
+            add_candidate(txt)
+            for m in re.findall(r'href=["\']([^"\']+)["\']', unescape(txt)):
+                add_candidate(m)
+
+    # explicit catch for escaped HTML embedded in popover data attributes
+    for match in re.finditer(r'(?:href|src)=(?:["\'])?([^\s"\'>]+)', unescape(html)):
+        add_candidate(match.group(1))
+
     return sorted(candidates)
 
 
@@ -73,11 +82,12 @@ def find_class_pages_from_contest(html, base):
         text = (a.get_text() or "").strip()
         if not href:
             continue
-        if any(p in href for p in ("/classes/", "/results/", "/class/")):
+        # Match class result pages but exclude daily task pages
+        if any(p in href for p in ("/classes/", "/results/", "/class/")) and not ('/task-' in href and '/daily' in href):
             cls_name = text or href.split('/')[-1]
             url_abs = href if href.startswith('http') else urljoin(base, href)
             classes.append((sanitize(cls_name), url_abs))
-    # dedupe preserving order
+    # dedupe by URL, preserving first occurrence
     seen = set(); out = []
     for n, u in classes:
         if u in seen: continue
@@ -110,7 +120,25 @@ def parse_day_from_text(text: str):
     return None
 
 
+def extract_day_from_url(url: str):
+    if not url:
+        return None
+    p = urlparse(url)
+    path = p.path.rstrip('/')
+    for pat in [
+        r"/task[-_]?[^/]*-on-(\d{4}-\d{2}-\d{2})",
+        r"/(\d{4}-\d{2}-\d{2})",
+    ]:
+        m = re.search(pat, path, flags=re.IGNORECASE)
+        if m:
+            return m.group(1)
+    return None
+
+
 def extract_day_from_page(html: str, url: str):
+    d = extract_day_from_url(url)
+    if d:
+        return d
     s = BeautifulSoup(html, 'html.parser')
     for h in ['h1', 'h2', 'h3', 'h4']:
         for el in s.find_all(h):
@@ -138,20 +166,6 @@ def extract_day_from_page(html: str, url: str):
     return 'day'
 
 
-def format_task_date(val):
-    if not val:
-        return None
-    if isinstance(val, str):
-        m = re.search(r"(20\d{2}-\d{2}-\d{2})", val)
-        if m:
-            return m.group(1)
-        d = parse_day_from_text(val)
-        if d:
-            return d
-        return sanitize(val)
-    return None
-
-
 def canonical_url(u):
     p = urlparse(u)
     q = dict(parse_qsl(p.query, keep_blank_values=True))
@@ -176,45 +190,15 @@ if contest_mode:
 
         if resp:
             base = f"{urlparse(url).scheme}://{urlparse(url).netloc}"
-            # Discover classes via API (if asked) then HTML fallback and show selection UI
             st.info('Discovering classes...')
             contest_name = sanitize(urlparse(url).path.split('/')[-2] if '/' in urlparse(url).path else 'contest')
-            api_classes = {}
             html_classes = {}
             class_names = []
 
-            if use_api and api_token:
-                try:
-                    parts = [p for p in urlparse(url).path.split('/') if p]
-                    slug = parts[-1] if parts else None
-                    headers = {'Authorization': f'Bearer {api_token}'}
-                    q = {'slug': slug} if slug else {}
-                    cresp = sess.get('https://api.soaringspot.com/v1/contests', params=q, headers=headers, timeout=10)
-                    cresp.raise_for_status()
-                    items = cresp.json()
-                    if isinstance(items, dict) and items.get('data'):
-                        items = items['data']
-                    contest = items[0]
-                    contest_name = sanitize(contest.get('name') or contest.get('title') or slug or contest_name)
-                    contest_id = contest.get('id') or contest.get('contest_id')
-                    cresp = sess.get(f'https://api.soaringspot.com/v1/contests/{contest_id}/classes', headers=headers, timeout=10)
-                    if cresp.ok:
-                        cdata = cresp.json()
-                        if isinstance(cdata, dict) and cdata.get('data'):
-                            cdata = cdata['data']
-                        for cls in cdata:
-                            cls_name = sanitize(cls.get('name') or cls.get('title') or str(cls.get('id')))
-                            cls_id = cls.get('id')
-                            api_classes[cls_name] = {'id': cls_id, 'name': cls_name}
-                            class_names.append(cls_name)
-                except Exception as e:
-                    st.warning(f'API class discovery failed: {e}')
-
-            # HTML fallback
+            # Discover classes from HTML
             class_pages = find_class_pages_from_contest(resp.text, base)
             for n, u in class_pages:
-                if n not in class_names:
-                    class_names.append(n)
+                class_names.append(n)
                 html_classes[n] = u
 
             class_names = sorted(set(class_names))
@@ -223,74 +207,43 @@ if contest_mode:
             else:
                 st.write('Discovered classes:')
                 st.write(class_names)
-                selected = st.multiselect('Select classes to download', options=class_names, default=class_names)
-                if st.button('Download selected classes', key='download_selected') and selected:
+                with st.form(key='contest_class_form'):
+                    selected = st.multiselect('Select classes to download', options=class_names, default=class_names, key='contest_selected_classes')
+                    submitted = st.form_submit_button('Download selected classes')
+                if submitted and selected:
                     all_links = []
-                    # API-selected
-                    if use_api and api_token and api_classes:
-                        headers = {'Authorization': f'Bearer {api_token}'}
-                        for name in selected:
-                            if name in api_classes:
-                                cls_id = api_classes[name]['id']
-                                cls_name = api_classes[name]['name']
-                                try:
-                                    tresp = sess.get(f'https://api.soaringspot.com/v1/classes/{cls_id}/tasks', headers=headers, timeout=10)
-                                    if not tresp.ok:
-                                        continue
-                                    tdata = tresp.json()
-                                    if isinstance(tdata, dict) and tdata.get('data'):
-                                        tdata = tdata['data']
-                                    for t in tdata:
-                                        task_id = t.get('id')
-                                        tdate = format_task_date(t.get('date') or t.get('start_date') or t.get('task_date') or t.get('name') or '') or 'day'
-                                        results_resp = sess.get(f'https://api.soaringspot.com/v1/tasks/{task_id}/results', headers=headers, timeout=10)
-                                        if not results_resp.ok:
-                                            continue
-                                        rdata = results_resp.json()
-                                        if isinstance(rdata, dict) and rdata.get('data'):
-                                            rdata = rdata['data']
-                                        for ritem in rdata:
-                                            flight_id = None
-                                            if isinstance(ritem, dict):
-                                                flight_id = ritem.get('flight_id') or (ritem.get('flight') or {}).get('id')
-                                            if flight_id:
-                                                fresp = sess.get(f'https://api.soaringspot.com/v1/flights/{flight_id}', headers=headers, timeout=10)
-                                                if fresp.ok:
-                                                    try:
-                                                        fj = fresp.json()
-                                                        download_url = fj.get('download') or fj.get('download_url') or fj.get('url')
-                                                        if download_url:
-                                                            all_links.append((download_url, contest_name, cls_name, tdate))
-                                                        else:
-                                                            all_links.append((urljoin(base, f"/en_gb/download-contest-flight/{contest_id}-{flight_id}?dl=1"), contest_name, cls_name, tdate))
-                                                    except Exception:
-                                                        all_links.append((f'https://api.soaringspot.com/v1/flights/{flight_id}', contest_name, cls_name, tdate))
-                                except Exception:
-                                    continue
-
-                    # HTML-selected
+                    # Download from HTML class pages
                     for name in selected:
-                        if name in html_classes and name not in api_classes:
+                        if name in html_classes:
                             cls_url = html_classes[name]
+                            st.write(f"### Fetching class: `{name}`")
+                            st.write(f"URL: `{cls_url}`")
                             try:
                                 cr = sess.get(cls_url, timeout=12); cr.raise_for_status()
                                 cls_soup = BeautifulSoup(cr.text, 'html.parser')
                                 found_daily = []
                                 for a in cls_soup.find_all('a', href=True):
                                     href = a['href']
-                                    if '/daily' in href or ('/results/' in href and 'task' in href):
+                                    # Match daily results or task pages: /daily, /task-, task-X-on-YYYY-MM-DD patterns
+                                    if any(pat in href.lower() for pat in ['/daily', 'task-', '/task/']):
                                         found_daily.append(href if href.startswith('http') else urljoin(base, href))
+                                found_daily = list(dict.fromkeys(found_daily))
+                                st.info(f"Found **{len(found_daily)}** daily page links for {name}")
+                                for dl in found_daily[:3]:  # Show first 3
+                                    st.write(f"  - {dl[-80:]}")
+                                if len(found_daily) > 3:
+                                    st.write(f"  ... and {len(found_daily)-3} more")
                                 if found_daily:
                                     for dl in found_daily:
                                         try:
                                             dr = sess.get(dl, timeout=12); dr.raise_for_status()
-                                            day = extract_day_from_page(dr.text, dl) or sanitize(dl.rstrip('/').split('/')[-1])
+                                            day = extract_day_from_url(dl) or extract_day_from_page(dr.text, dl) or sanitize(dl.rstrip('/').split('/')[-1])
                                             for link in find_candidates(dr.text, base):
                                                 all_links.append((link, contest_name, name, day))
                                         except Exception:
                                             continue
                                 else:
-                                    page_day = extract_day_from_page(cr.text, cls_url) or 'all'
+                                    page_day = extract_day_from_url(cls_url) or extract_day_from_page(cr.text, cls_url) or 'all'
                                     for link in find_candidates(cr.text, base):
                                         all_links.append((link, contest_name, name, page_day))
                             except Exception:
@@ -299,12 +252,26 @@ if contest_mode:
                     # dedupe and download
                     seen = set(); final = []
                     for link, c_name, cls_name, day in all_links:
-                        key = canonical_url(link)
+                        # dedupe by canonical URL and by explicit task date to avoid repeated daily folders
+                        key = (canonical_url(link), str(day))
                         if key in seen: continue
                         seen.add(key); final.append((link, c_name, cls_name, day))
 
+                    # Count unique days
+                    by_day = {}
+                    for link, c_name, cls_name, day in final:
+                        by_day.setdefault(str(day), 0)
+                        by_day[str(day)] += 1
+                    
+                    st.info(f"**Found {len(final)} unique links across {len(by_day)} days:**")
+                    for day in sorted(by_day.keys()):
+                        st.write(f"  • {day}: {by_day[day]} files")
+                    st.write("---")
+
+                    st.info(f"Downloading {len(final)} files across {len(by_day)} unique days...")
                     prog = st.progress(0); rows = []
                     for i, (link, c_name, cls_name, day) in enumerate(final, 1):
+                        st.write(f"**{i}/{len(final)}** Day: `{day}` | Link: {link[-50:]}")
                         fetch = link
                         if '/download-contest-flight/' in link and 'dl=' not in link:
                             fetch = link + ('&dl=1' if '?' in link else '?dl=1')
@@ -316,10 +283,13 @@ if contest_mode:
                                 out_dir = os.path.join(DOWNLOAD_DIR, sanitize(c_name), sanitize(cls_name), sanitize(str(day)))
                                 path = save_stream(r, out_dir)
                                 rows.append((link,'ok',path))
+                                st.success(f"✓ Saved to {out_dir}")
                             else:
                                 rows.append((link,f'skip {r.status_code}|{ctype}',None))
+                                st.warning(f"✗ Skipped: {r.status_code} | {ctype[:30]}")
                         except Exception as e:
                             rows.append((link,f'err {e}',None))
+                            st.error(f"✗ Error: {str(e)[:80]}")
                         prog.progress(int(i/len(final)*100))
 
                     st.dataframe([{'link':l,'status':s,'path':p} for l,s,p in rows])
