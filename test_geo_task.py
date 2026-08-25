@@ -1,5 +1,6 @@
 import unittest
 
+from map_helpers import GliderTrace
 from geo_task import (
     _bearing_between_points,
     _infer_sector_orientation,
@@ -18,6 +19,23 @@ from geo_task import (
 
 
 class SectorGeometryTests(unittest.TestCase):
+    def test_glider_trace_exposes_task_zone_metadata(self):
+        path = (
+            "igc_downloads/open-standard-15m-nationals-2026-husbands-bosworth-2026/"
+            "15 Metre/2026-08-08/688_10.igc"
+        )
+        trace = GliderTrace(path)
+
+        self.assertEqual(trace.file_path, path)
+        self.assertIsNotNone(trace.flight)
+        self.assertGreater(len(trace.task_points), 0)
+        self.assertGreater(len(trace.sectors), 0)
+        self.assertIsNotNone(trace.get_start_time())
+        self.assertIsNotNone(trace.get_task_points())
+        self.assertIsNotNone(trace.get_sectors())
+        self.assertIsNotNone(trace.get_zone_fix_mask())
+        self.assertIsNotNone(trace.get_task_route())
+
     def test_sector_arc_is_symmetric_about_outward_bisector(self):
         center_lat = 0.0
         center_lon = 0.0
