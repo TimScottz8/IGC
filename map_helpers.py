@@ -3,6 +3,9 @@ import plotly.graph_objects as go
 import streamlit as st
 import libigc
 
+MAP_TRACE = getattr(go, "Scattermapbox", go.Scattermap)
+MAP_LAYOUT_KEY = "mapbox" if hasattr(go, "Scattermapbox") else "map"
+
 from geo_task import (
     build_sector_split_points,
     extract_finish_sector_from_igc,
@@ -177,7 +180,7 @@ def plot_traces_on_map(traces):
         lon_values.extend(trace_df["lon"].tolist())
 
         fig.add_trace(
-            go.Scattermapbox(
+            MAP_TRACE(
                 lat=trace_df["lat"],
                 lon=trace_df["lon"],
                 mode="lines",
@@ -189,7 +192,7 @@ def plot_traces_on_map(traces):
 
         if not task_df.empty:
             fig.add_trace(
-                go.Scattermapbox(
+                MAP_TRACE(
                     lat=task_df["lat"],
                     lon=task_df["lon"],
                     mode="lines",
@@ -199,7 +202,7 @@ def plot_traces_on_map(traces):
                 )
             )
             fig.add_trace(
-                go.Scattermapbox(
+                MAP_TRACE(
                     lat=task_df["lat"],
                     lon=task_df["lon"],
                     mode="markers+text",
@@ -232,7 +235,7 @@ def plot_traces_on_map(traces):
 
             def draw_arc(points, name_suffix):
                 fig.add_trace(
-                    go.Scattermapbox(
+                    MAP_TRACE(
                         lat=[p[0] for p in points],
                         lon=[p[1] for p in points],
                         mode="lines",
@@ -245,7 +248,7 @@ def plot_traces_on_map(traces):
             if clockwise_points:
                 radial_clockwise = [(sector["lat"], sector["lon"]), clockwise_points[-1]]
                 fig.add_trace(
-                    go.Scattermapbox(
+                    MAP_TRACE(
                         lat=[p[0] for p in radial_clockwise],
                         lon=[p[1] for p in radial_clockwise],
                         mode="lines",
@@ -259,7 +262,7 @@ def plot_traces_on_map(traces):
             if anticlockwise_points:
                 radial_anticlockwise = [(sector["lat"], sector["lon"]), anticlockwise_points[-1]]
                 fig.add_trace(
-                    go.Scattermapbox(
+                    MAP_TRACE(
                         lat=[p[0] for p in radial_anticlockwise],
                         lon=[p[1] for p in radial_anticlockwise],
                         mode="lines",
@@ -277,7 +280,7 @@ def plot_traces_on_map(traces):
 
             if inner_clockwise_points is not None and inner_anticlockwise_points is not None:
                 fig.add_trace(
-                    go.Scattermapbox(
+                    MAP_TRACE(
                         lat=[sector["lat"], inner_clockwise_points[0][0], inner_anticlockwise_points[0][0]],
                         lon=[sector["lon"], inner_clockwise_points[0][1], inner_anticlockwise_points[0][1]],
                         mode="lines",
@@ -319,7 +322,7 @@ def plot_traces_on_map(traces):
                 else:
                     if current_in_sector:
                         fig.add_trace(
-                            go.Scattermapbox(
+                            MAP_TRACE(
                                 lat=[point[0] for point in current_segment],
                                 lon=[point[1] for point in current_segment],
                                 mode="lines",
@@ -333,7 +336,7 @@ def plot_traces_on_map(traces):
 
             if current_segment and current_in_sector:
                 fig.add_trace(
-                    go.Scattermapbox(
+                    MAP_TRACE(
                         lat=[point[0] for point in current_segment],
                         lon=[point[1] for point in current_segment],
                         mode="lines",
@@ -347,15 +350,16 @@ def plot_traces_on_map(traces):
         st.warning("No valid trace data available to plot.")
         return
 
-    fig.update_layout(
-        mapbox={
+    layout_args = {
+        MAP_LAYOUT_KEY: {
             "style": "carto-positron",
             "center": {"lat": sum(lat_values) / len(lat_values), "lon": sum(lon_values) / len(lon_values)},
             "zoom": 7,
         },
-        margin={"l": 0, "r": 0, "t": 0, "b": 0},
-        legend={"x": 0.01, "y": 0.99, "xanchor": "left", "yanchor": "top"},
-    )
+        "margin": {"l": 0, "r": 0, "t": 0, "b": 0},
+        "legend": {"x": 0.01, "y": 0.99, "xanchor": "left", "yanchor": "top"},
+    }
+    fig.update_layout(**layout_args)
     st.plotly_chart(fig, use_container_width=True)
 
 
@@ -373,7 +377,7 @@ def render_igc_map(file_path: str):
 
     fig = go.Figure()
     fig.add_trace(
-        go.Scattermapbox(
+        MAP_TRACE(
             lat=trace.trace_df["lat"],
             lon=trace.trace_df["lon"],
             mode="lines",
@@ -385,7 +389,7 @@ def render_igc_map(file_path: str):
 
     if not trace.task_df.empty:
         fig.add_trace(
-            go.Scattermapbox(
+            MAP_TRACE(
                 lat=trace.task_df["lat"],
                 lon=trace.task_df["lon"],
                 mode="lines",
@@ -395,7 +399,7 @@ def render_igc_map(file_path: str):
             )
         )
         fig.add_trace(
-            go.Scattermapbox(
+            MAP_TRACE(
                 lat=trace.task_df["lat"],
                 lon=trace.task_df["lon"],
                 mode="markers+text",
@@ -428,7 +432,7 @@ def render_igc_map(file_path: str):
 
         def draw_arc(points, name_suffix):
             fig.add_trace(
-                go.Scattermapbox(
+                MAP_TRACE(
                     lat=[p[0] for p in points],
                     lon=[p[1] for p in points],
                     mode="lines",
@@ -441,7 +445,7 @@ def render_igc_map(file_path: str):
         if clockwise_points:
             radial_clockwise = [(sector["lat"], sector["lon"]), clockwise_points[-1]]
             fig.add_trace(
-                go.Scattermapbox(
+                MAP_TRACE(
                     lat=[p[0] for p in radial_clockwise],
                     lon=[p[1] for p in radial_clockwise],
                     mode="lines",
@@ -455,7 +459,7 @@ def render_igc_map(file_path: str):
         if anticlockwise_points:
             radial_anticlockwise = [(sector["lat"], sector["lon"]), anticlockwise_points[-1]]
             fig.add_trace(
-                go.Scattermapbox(
+                MAP_TRACE(
                     lat=[p[0] for p in radial_anticlockwise],
                     lon=[p[1] for p in radial_anticlockwise],
                     mode="lines",
@@ -473,7 +477,7 @@ def render_igc_map(file_path: str):
 
         if inner_clockwise_points is not None and inner_anticlockwise_points is not None:
             fig.add_trace(
-                go.Scattermapbox(
+                MAP_TRACE(
                     lat=[sector["lat"], inner_clockwise_points[0][0], inner_anticlockwise_points[0][0]],
                     lon=[sector["lon"], inner_clockwise_points[0][1], inner_anticlockwise_points[0][1]],
                     mode="lines",
@@ -512,7 +516,7 @@ def render_igc_map(file_path: str):
             else:
                 if current_in_sector:
                     fig.add_trace(
-                        go.Scattermapbox(
+                        MAP_TRACE(
                             lat=[point[0] for point in current_segment],
                             lon=[point[1] for point in current_segment],
                             mode="lines",
@@ -526,7 +530,7 @@ def render_igc_map(file_path: str):
 
         if current_segment and current_in_sector:
             fig.add_trace(
-                go.Scattermapbox(
+                MAP_TRACE(
                     lat=[point[0] for point in current_segment],
                     lon=[point[1] for point in current_segment],
                     mode="lines",
@@ -536,15 +540,16 @@ def render_igc_map(file_path: str):
                 )
             )
 
-    fig.update_layout(
-        mapbox={
+    layout_args = {
+        MAP_LAYOUT_KEY: {
             "style": "carto-positron",
             "center": {"lat": trace.lat_center, "lon": trace.lon_center},
             "zoom": 7,
         },
-        margin={"l": 0, "r": 0, "t": 0, "b": 0},
-        legend={"x": 0.01, "y": 0.99, "xanchor": "left", "yanchor": "top"},
-    )
+        "margin": {"l": 0, "r": 0, "t": 0, "b": 0},
+        "legend": {"x": 0.01, "y": 0.99, "xanchor": "left", "yanchor": "top"},
+    }
+    fig.update_layout(**layout_args)
 
     st.plotly_chart(fig, use_container_width=True)
     st.caption(f"Flight fixes: {len(trace.trace_df)} | Task points: {len(trace.task_df)}")
