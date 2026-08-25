@@ -13,6 +13,7 @@ from geo_task import (
     is_point_in_sector,
     project_geometry_table,
     project_point_from_bearing,
+    segment_crosses_sector,
 )
 
 
@@ -238,6 +239,7 @@ class SectorGeometryTests(unittest.TestCase):
         self.assertFalse(is_point_in_sector(outside_lat, outside_lon, sector))
         self.assertFalse(is_point_in_sector(far_lat, far_lon, sector))
 
+
     def test_extract_glider_start_time_ignores_post_tp1_start_sector_fixes(self):
         start_sector = {
             "lat": 0.0,
@@ -265,6 +267,34 @@ class SectorGeometryTests(unittest.TestCase):
             extract_glider_start_time(fixes, start_sector, tp1_sector),
             "2024-01-01T10:00:00Z",
         )
+
+    def test_point_in_sector_counts_inner_radius_as_valid_for_inclusive_envelope(self):
+        sector = {
+            "lat": 0.0,
+            "lon": 0.0,
+            "radius_m": 1000.0,
+            "inner_radius_m": 500.0,
+            "a1_deg": 45.0,
+            "orientation_deg": 90.0,
+        }
+
+        inside_inner_lat, inside_inner_lon = project_point_from_bearing(0.0, 0.0, 90.0, 250.0)
+        self.assertTrue(is_point_in_sector(inside_inner_lat, inside_inner_lon, sector))
+
+    def test_track_segment_crosses_sector_when_line_passes_through_inner_radius(self):
+        sector = {
+            "lat": 0.0,
+            "lon": 0.0,
+            "radius_m": 1000.0,
+            "inner_radius_m": 500.0,
+            "a1_deg": 45.0,
+            "orientation_deg": 90.0,
+        }
+
+        start_lat, start_lon = project_point_from_bearing(0.0, 0.0, 90.0, 1500.0)
+        end_lat, end_lon = project_point_from_bearing(0.0, 0.0, 270.0, 1500.0)
+
+        self.assertTrue(segment_crosses_sector(start_lat, start_lon, end_lat, end_lon, sector))
 
     def test_format_human_readable_datetime_uses_utc(self):
         self.assertEqual(

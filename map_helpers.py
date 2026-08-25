@@ -12,21 +12,22 @@ from geo_task import (
     extract_task_sectors_from_igc,
     format_human_readable_datetime,
     is_point_in_sector,
+    segment_crosses_sector,
 )
 
 
-def render_igc_map(file_path: str):
+def _build_trace(file_path: str):
     try:
         flight = libigc.Flight.create_from_file(file_path)
     except Exception as exc:
         st.error(f"Could not parse IGC file: {exc}")
-        return
+        return None
 
     if not flight.valid:
         st.error("This file was parsed but marked invalid by the IGC library.")
         if flight.notes:
             st.write(flight.notes[:5])
-        return
+        return None
 
     fix_rows = [{"lat": fix.lat, "lon": fix.lon, "timestamp": fix.timestamp} for fix in flight.fixes]
     trace_df = pd.DataFrame(fix_rows)
@@ -37,7 +38,7 @@ def render_igc_map(file_path: str):
 
     if trace_df.empty:
         st.warning("No valid flight fixes were found in the selected file.")
-        return
+        return None
 
     lat_center = float(trace_df["lat"].mean())
     lon_center = float(trace_df["lon"].mean())
@@ -50,30 +51,167 @@ def render_igc_map(file_path: str):
     ]
     first_turnpoint_sector = min(turnpoint_sectors, key=lambda sector: int(sector.get("idx", 10**9))) if turnpoint_sectors else None
     start_time = extract_glider_start_time(flight.fixes, start_sector, first_turnpoint_sector)
-    st.text_input(
-        "Glider start time",
-        value=format_human_readable_datetime(start_time),
-        key="glider_start_time",
-        disabled=True,
-    )
+
+    trace = {
+        "file_path": file_path,
+        "flight": flight,
+        "trace_df": trace_df,
+        "task_df": task_df,
+        "all_sectors": all_sectors,
+        "start_sector": start_sector,
+        "finish_sector": finish_sector,
+        "start_time": start_time,
+        "lat_center": lat_center,
+        "lon_center": lon_center,
+    }
+
+    start_idx = start_sector.get("idx") if start_sector else None
+    finish_idx = finish_sector.get("idx") if finish_sector else None
+    turnpoint_sectors = [
+        sector
+        for sector in all_sectors
+        if sector.get("idx") not in {start_idx, finish_idx} and sector.get("idx") is not None
+    ]
+    sector_candidates = [sector for sector in [start_sector, finish_sector, *turnpoint_sectors] if sector]
+
+    trace["sector_candidates"] = sector_candidates
+    trace["sector_fix_mask"] = pd.Series(False, index=trace_df.index)
+    for idx in range(len(trace_df)):
+        row = trace_df.iloc[idx]
+        if any(is_point_in_sector(float(row["lat"]), float(row["lon"]), sector) for sector in sector_candidates):
+            trace["sector_fix_mask"].iloc[idx] = True
+            if idx > 0:
+                trace["sector_fix_mask"].iloc[idx - 1] = True
+            continue
+
+        if idx == 0:
+            continue
+
+        prev_row = trace_df.iloc[idx - 1]
+        if any(
+            segment_crosses_sector(
+                float(prev_row["lat"]),
+                float(prev_row["lon"]),
+                float(row["lat"]),
+                float(row["lon"]),
+                sector,
+            )
+            for sector in sector_candidates
+        ):
+            trace["sector_fix_mask"].iloc[idx] = True
+            trace["sector_fix_mask"].iloc[idx - 1] = True
+
+    return trace
+
+
+def plot_traces_on_map(traces):
+    if not traces:
+        st.warning("No traces to plot.")
+        return
 
     fig = go.Figure()
-    if not trace_df.empty:
+    palette = [
+        "#000000",
+        "#d62728",
+        "#2ca02c",
+        "#ff7f0e",
+        "#1f77b4",
+        "#9467bd",
+        "#8c564b",
+    ]
+
+    lat_values = []
+    lon_values = []
+    for index, trace in enumerate(traces):
+        trace_df = trace["trace_df"]
+        task_df = trace["task_df"]
+        if trace_df.empty:
+            continue
+
+        color = palette[index % len(palette)]
+        lat_values.extend(trace_df["lat"].tolist())
+        lon_values.extend(trace_df["lon"].tolist())
+
         fig.add_trace(
             go.Scattermapbox(
                 lat=trace_df["lat"],
                 lon=trace_df["lon"],
                 mode="lines",
-                line={"color": "#000000", "width": 2},
-                name="Glider track",
+                line={"color": color, "width": 2},
+                name=f"Flight {index + 1}",
                 hoverinfo="skip",
             )
         )
-    if not task_df.empty:
+
+        if not task_df.empty:
+            fig.add_trace(
+                go.Scattermapbox(
+                    lat=task_df["lat"],
+                    lon=task_df["lon"],
+                    mode="lines",
+                    line={"color": color, "width": 2},
+                    name=f"Task route {index + 1}",
+                    hoverinfo="skip",
+                )
+            )
+            fig.add_trace(
+                go.Scattermapbox(
+                    lat=task_df["lat"],
+                    lon=task_df["lon"],
+                    mode="markers+text",
+                    text=task_df["name"],
+                    textposition="top center",
+                    marker={"color": color, "size": 12},
+                    name=f"Task {index + 1}",
+                    hovertemplate="%{text}<extra></extra>",
+                )
+            )
+
+    if not lat_values or not lon_values:
+        st.warning("No valid trace data available to plot.")
+        return
+
+    fig.update_layout(
+        mapbox={
+            "style": "carto-positron",
+            "center": {"lat": sum(lat_values) / len(lat_values), "lon": sum(lon_values) / len(lon_values)},
+            "zoom": 7,
+        },
+        margin={"l": 0, "r": 0, "t": 0, "b": 0},
+        legend={"x": 0.01, "y": 0.99, "xanchor": "left", "yanchor": "top"},
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+
+def render_igc_map(file_path: str):
+    trace = _build_trace(file_path)
+    if trace is None:
+        return None
+
+    st.text_input(
+        "Glider start time",
+        value=format_human_readable_datetime(trace["start_time"]),
+        key="glider_start_time",
+        disabled=True,
+    )
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scattermapbox(
+            lat=trace["trace_df"]["lat"],
+            lon=trace["trace_df"]["lon"],
+            mode="lines",
+            line={"color": "#000000", "width": 2},
+            name="Glider track",
+            hoverinfo="skip",
+        )
+    )
+
+    if not trace["task_df"].empty:
         fig.add_trace(
             go.Scattermapbox(
-                lat=task_df["lat"],
-                lon=task_df["lon"],
+                lat=trace["task_df"]["lat"],
+                lon=trace["task_df"]["lon"],
                 mode="lines",
                 line={"color": "#d62728", "width": 2},
                 name="Task route",
@@ -82,10 +220,10 @@ def render_igc_map(file_path: str):
         )
         fig.add_trace(
             go.Scattermapbox(
-                lat=task_df["lat"],
-                lon=task_df["lon"],
+                lat=trace["task_df"]["lat"],
+                lon=trace["task_df"]["lon"],
                 mode="markers+text",
-                text=task_df["name"],
+                text=trace["task_df"]["name"],
                 textposition="top center",
                 marker={"color": "#d62728", "size": 12},
                 name="Task",
@@ -125,10 +263,7 @@ def render_igc_map(file_path: str):
             )
 
         if clockwise_points:
-            radial_clockwise = [
-                (sector["lat"], sector["lon"]),
-                clockwise_points[-1],
-            ]
+            radial_clockwise = [(sector["lat"], sector["lon"]), clockwise_points[-1]]
             fig.add_trace(
                 go.Scattermapbox(
                     lat=[p[0] for p in radial_clockwise],
@@ -142,10 +277,7 @@ def render_igc_map(file_path: str):
             draw_arc(clockwise_points, "clockwise")
 
         if anticlockwise_points:
-            radial_anticlockwise = [
-                (sector["lat"], sector["lon"]),
-                anticlockwise_points[-1],
-            ]
+            radial_anticlockwise = [(sector["lat"], sector["lon"]), anticlockwise_points[-1]]
             fig.add_trace(
                 go.Scattermapbox(
                     lat=[p[0] for p in radial_anticlockwise],
@@ -162,7 +294,7 @@ def render_igc_map(file_path: str):
             draw_arc(inner_clockwise_points, "inner clockwise")
         if inner_anticlockwise_points is not None:
             draw_arc(inner_anticlockwise_points, "inner anticlockwise")
- 
+
         if inner_clockwise_points is not None and inner_anticlockwise_points is not None:
             fig.add_trace(
                 go.Scattermapbox(
@@ -175,6 +307,9 @@ def render_igc_map(file_path: str):
                 )
             )
 
+    start_sector = trace["start_sector"]
+    finish_sector = trace["finish_sector"]
+    all_sectors = trace["all_sectors"]
     start_idx = start_sector.get("idx") if start_sector else None
     finish_idx = finish_sector.get("idx") if finish_sector else None
     turnpoint_sectors = [
@@ -182,32 +317,22 @@ def render_igc_map(file_path: str):
         for sector in all_sectors
         if sector.get("idx") not in {start_idx, finish_idx} and sector.get("idx") is not None
     ]
-    sector_candidates = [sector for sector in [start_sector, finish_sector, *turnpoint_sectors] if sector]
 
     if start_sector:
         add_sector_overlay(start_sector, "Start sector", "#2ca02c")
     if finish_sector and finish_idx != start_idx:
         add_sector_overlay(finish_sector, "Finish sector", "#ff7f0e")
-
     for sector in turnpoint_sectors:
         add_sector_overlay(sector, "Turnpoint sector", "#1f77b4")
 
-    sector_fix_mask = trace_df.apply(
-        lambda row: any(
-            is_point_in_sector(float(row["lat"]), float(row["lon"]), sector)
-            for sector in sector_candidates
-        ),
-        axis=1,
-    )
-
-    if sector_fix_mask.any():
+    if trace["sector_fix_mask"].any():
         current_segment = []
         current_in_sector = None
-        for idx, in_sector in sector_fix_mask.items():
+        for idx, in_sector in trace["sector_fix_mask"].items():
             if current_in_sector is None:
                 current_in_sector = bool(in_sector)
             if bool(in_sector) == current_in_sector:
-                current_segment.append((float(trace_df.loc[idx, "lat"]), float(trace_df.loc[idx, "lon"])))
+                current_segment.append((float(trace["trace_df"].loc[idx, "lat"]), float(trace["trace_df"].loc[idx, "lon"])))
             else:
                 if current_in_sector:
                     fig.add_trace(
@@ -220,7 +345,7 @@ def render_igc_map(file_path: str):
                             hoverinfo="skip",
                         )
                     )
-                current_segment = [(float(trace_df.loc[idx, "lat"]), float(trace_df.loc[idx, "lon"]))]
+                current_segment = [(float(trace["trace_df"].loc[idx, "lat"]), float(trace["trace_df"].loc[idx, "lon"]))]
                 current_in_sector = bool(in_sector)
 
         if current_segment and current_in_sector:
@@ -238,7 +363,7 @@ def render_igc_map(file_path: str):
     fig.update_layout(
         mapbox={
             "style": "carto-positron",
-            "center": {"lat": lat_center, "lon": lon_center},
+            "center": {"lat": trace["lat_center"], "lon": trace["lon_center"]},
             "zoom": 7,
         },
         margin={"l": 0, "r": 0, "t": 0, "b": 0},
@@ -246,8 +371,10 @@ def render_igc_map(file_path: str):
     )
 
     st.plotly_chart(fig, use_container_width=True)
-    st.caption(f"Flight fixes: {len(trace_df)} | Task points: {len(task_df)}")
+    st.caption(f"Flight fixes: {len(trace['trace_df'])} | Task points: {len(trace['task_df'])}")
 
-    if flight.notes:
+    if trace["flight"].notes:
         with st.expander("Flight parsing notes"):
-            st.write(flight.notes[:10])
+            st.write(trace["flight"].notes[:10])
+
+    return trace
