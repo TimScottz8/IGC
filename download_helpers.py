@@ -22,18 +22,6 @@ def sanitize(name: str) -> str:
     return re.sub(r"[^A-Za-z0-9 _-]", "_", str(name)).strip()[:150]
 
 
-def list_downloaded_igc_files(base_dir: str = DOWNLOAD_DIR):
-    matches = []
-    if not os.path.isdir(base_dir):
-        return matches
-    for root, _, files in os.walk(base_dir):
-        for name in sorted(files):
-            if name.lower().endswith('.igc'):
-                full_path = os.path.join(root, name)
-                matches.append(os.path.relpath(full_path, start='.'))
-    return sorted(matches)
-
-
 def save_stream(r, out_dir):
     cd = r.headers.get('content-disposition', '')
     m = re.search(r'filename="?([^";]+)"?', cd)
@@ -217,17 +205,28 @@ def find_class_pages_from_contest(html, base):
         path_parts = [seg for seg in urlparse(url_abs).path.split('/') if seg]
 
         cls_slug = None
+        class_url = url_abs
+
         for marker in ('results', 'classes', 'class'):
             if marker in path_parts:
                 idx = path_parts.index(marker)
                 tail = path_parts[idx + 1:]
-                if len(tail) == 1:
-                    cls_slug = tail[0]
+                if len(tail) >= 1:
+                    if "day" in tail:
+                        cls_idx = tail.index("day")
+                        if cls_idx >= 1:
+                            cls_slug = tail[cls_idx - 1]
+                            class_path = "/" + "/".join(path_parts[:idx + cls_idx + 1])
+                            class_url = urlunparse(urlparse(url_abs)._replace(path=class_path, query='', fragment=''))
+                    else:
+                        cls_slug = tail[0]
+                        class_path = "/" + "/".join(path_parts[:idx + 2])
+                        class_url = urlunparse(urlparse(url_abs)._replace(path=class_path, query='', fragment=''))
                 break
 
         if cls_slug:
             cls_name = sanitize(text or cls_slug.replace('-', ' ').title())
-            classes.append((cls_name, url_abs))
+            classes.append((cls_name, class_url))
     seen = set()
     out = []
     for n, u in classes:

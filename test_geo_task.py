@@ -1,9 +1,15 @@
+import os
 import unittest
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QTreeWidget
 
 from qt_app import MainWindow, build_contest_download_plan
+from qt_helpers import build_contest_result_lines
 from map_helpers import GliderTrace
+from flight_model import FlightRecord, load_flight_record
+from flight_set import FlightSet
+from scene_state import SceneState
+from timeline_state import TimelineState
 from geo_task import (
     _bearing_between_points,
     _infer_sector_orientation,
@@ -58,6 +64,39 @@ class SectorGeometryTests(unittest.TestCase):
         self.assertIsNotNone(trace.get_zone_fix_mask())
         self.assertIsNotNone(trace.get_task_route())
 
+    def test_build_contest_download_plan_deduplicates_equivalent_download_links(self):
+        contest_html = """
+        <html><body>
+            <a href="/en_gb/contest/results/15-meter/day/2026-08-08">15 Metre</a>
+            <a href="/download-contest-flight/abc123?dl=1">download</a>
+            <a href="/download-contest-flight/abc123">download</a>
+        </body></html>
+        """
+        plan = build_contest_download_plan(
+            "https://www.soaringspot.com/en_gb/contest/results",
+            contest_html,
+            "https://www.soaringspot.com",
+        )
+
+        self.assertEqual(len(plan), 1)
+        self.assertEqual(plan[0]["day"], "2026-08-08")
+        self.assertIn("download-contest-flight/abc123", plan[0]["link"])
+
+    def test_contest_result_lines_group_by_class_then_day(self):
+        plan = [
+            {"class_name": "15 Metre", "day": "2026-08-08", "link": "/a"},
+            {"class_name": "15 Metre", "day": "2026-08-08", "link": "/b"},
+            {"class_name": "15 Metre", "day": "2026-08-09", "link": "/c"},
+            {"class_name": "Open", "day": "2026-08-09", "link": "/d"},
+        ]
+
+        lines = build_contest_result_lines(plan, limit=50)
+
+        self.assertIn("15 Metre", "\n".join(lines))
+        self.assertIn("2026-08-08", "\n".join(lines))
+        self.assertIn("Open", "\n".join(lines))
+        self.assertLess(lines.index("[15 Metre]"), lines.index("[Open]"))
+
     def test_main_window_builds_start_time_entries_for_single_flight(self):
         app = QApplication.instance() or QApplication([])
         window = MainWindow()
@@ -67,6 +106,192 @@ class SectorGeometryTests(unittest.TestCase):
 
         self.assertEqual(entries, ["sample.igc — 2024-01-01 10:00:00 UTC"])
         app.quit()
+
+    def test_main_window_uses_collapsible_start_time_tree(self):
+        app = QApplication.instance() or QApplication([])
+        window = MainWindow()
+
+        self.assertTrue(hasattr(window, "start_times_tree"))
+        self.assertIs(window.start_times_list, window.start_times_tree)
+        self.assertTrue(window.start_times_tree.isHeaderHidden())
+        app.quit()
+
+    def test_main_window_uses_tree_widget_for_contest_results(self):
+        app = QApplication.instance() or QApplication([])
+        window = MainWindow()
+
+        self.assertIsInstance(window.contest_results, QTreeWidget)
+        self.assertTrue(window.contest_results.isHeaderHidden())
+        self.assertTrue(hasattr(window, "download_progress"))
+        app.quit()
+
+    def test_main_window_download_selection_tracks_class_day_and_flight_scope(self):
+        app = QApplication.instance() or QApplication([])
+        window = MainWindow()
+        plan = [
+            {"class_name": "15 Metre", "day": "2026-08-08", "link": "/a"},
+            {"class_name": "15 Metre", "day": "2026-08-08", "link": "/b"},
+            {"class_name": "15 Metre", "day": "2026-08-09", "link": "/c"},
+            {"class_name": "Open", "day": "2026-08-09", "link": "/d"},
+        ]
+        window.contest_download_plan = plan
+        window._render_contest_tree(plan)
+
+        contest_root = window.contest_results.topLevelItem(0)
+        class_item = contest_root.child(0)
+        day_item = class_item.child(0)
+        flight_item = day_item.child(0)
+
+        window.contest_results.setCurrentItem(contest_root)
+        self.assertEqual(len(window._selected_download_plan()), 4)
+
+        window.contest_results.setCurrentItem(class_item)
+        self.assertEqual(len(window._selected_download_plan()), 3)
+
+        window.contest_results.setCurrentItem(day_item)
+        self.assertEqual(len(window._selected_download_plan()), 2)
+
+        window.contest_results.setCurrentItem(flight_item)
+        self.assertEqual(len(window._selected_download_plan()), 1)
+        app.quit()
+
+    def test_main_window_can_open_multiple_igc_files(self):
+        app = QApplication.instance() or QApplication([])
+        window = MainWindow()
+        paths = [
+            "igc_downloads/open-standard-15m-nationals-2026-husbands-bosworth-2026/15 Metre/2026-08-08/688_10.igc",
+            "igc_downloads/open-standard-15m-nationals-2026-husbands-bosworth-2026/15 Metre/2026-08-09/689_10.igc",
+        ]
+
+        window.render_static_tracks(paths)
+
+        self.assertEqual(len(window.scene_state.active_flights), 2)
+        self.assertEqual(window.scene_state.selected_flight.file_path, paths[0])
+        self.assertIsNotNone(window.timeline)
+        app.quit()
+
+    def test_main_window_lists_downloaded_contests_from_local_dir(self):
+        app = QApplication.instance() or QApplication([])
+        window = MainWindow()
+
+        self.assertIsNotNone(window.local_contests)
+        self.assertTrue(window.local_contests.topLevelItemCount() > 0)
+        self.assertIn("open-standard-15m-nationals-2026-husbands-bosworth-2026", [
+            window.local_contests.topLevelItem(index).text(0)
+            for index in range(window.local_contests.topLevelItemCount())
+        ])
+        app.quit()
+
+    def test_main_window_start_time_list_allows_multi_select_for_multiple_flights(self):
+        app = QApplication.instance() or QApplication([])
+        window = MainWindow()
+
+        window.start_times_tree.setSelectionMode(QTreeWidget.SelectionMode.MultiSelection)
+        actual_paths = [
+            "igc_downloads/open-standard-15m-nationals-2026-husbands-bosworth-2026/15 Metre/2026-08-08/688_10.igc",
+            "igc_downloads/open-standard-15m-nationals-2026-husbands-bosworth-2026/15 Metre/2026-08-09/689_10.igc",
+        ]
+        window.refresh_start_time_list([
+            {"file_path": actual_paths[0], "start_time": "2024-01-01T10:00:00Z"},
+            {"file_path": actual_paths[1], "start_time": "2024-01-02T10:00:00Z"},
+        ])
+        self.assertEqual(len(window._selected_start_time_flight_paths()), 0)
+        day_item = window.start_times_tree.topLevelItem(0)
+        class_item = day_item.child(0)
+        first_file = class_item.child(0)
+        second_file = class_item.child(1)
+        first_file.setSelected(True)
+        second_file.setSelected(True)
+        self.assertEqual(len(window._selected_start_time_flight_paths()), 2)
+        window._render_selected_start_times()
+        self.assertEqual(len(window.scene_state.active_flights), 2)
+        app.quit()
+
+    def test_main_window_caches_loaded_flight_records_for_fast_selection(self):
+        app = QApplication.instance() or QApplication([])
+        window = MainWindow()
+        path = (
+            "igc_downloads/open-standard-15m-nationals-2026-husbands-bosworth-2026/"
+            "15 Metre/2026-08-08/688_10.igc"
+        )
+
+        first = window._cache_or_load_flight_record(path)
+        second = window._cache_or_load_flight_record(path)
+
+        self.assertIs(first, second)
+        self.assertIn(os.path.abspath(path), window.flight_cache)
+        app.quit()
+
+    def test_main_window_uses_single_2d_map_view(self):
+        app = QApplication.instance() or QApplication([])
+        window = MainWindow()
+
+        self.assertIsNotNone(window.plot_widget)
+        self.assertIs(window.secondary_plot_widget, window.plot_widget)
+        self.assertFalse(hasattr(window, "secondary_3d_widget"))
+        app.quit()
+
+    def test_main_window_no_longer_requires_3d_support(self):
+        app = QApplication.instance() or QApplication([])
+        window = MainWindow()
+
+        self.assertFalse(hasattr(window, "secondary_3d_widget"))
+        self.assertFalse(hasattr(window, "secondary_3d_axis"))
+        self.assertFalse(hasattr(window, "_build_secondary_3d_points"))
+        app.quit()
+
+    def test_load_flight_record_exposes_core_flight_metadata(self):
+        path = (
+            "igc_downloads/open-standard-15m-nationals-2026-husbands-bosworth-2026/"
+            "15 Metre/2026-08-08/688_10.igc"
+        )
+        record = load_flight_record(path)
+
+        self.assertIsInstance(record, FlightRecord)
+        self.assertEqual(record.file_path, path)
+        self.assertGreater(len(record.fixes), 0)
+        self.assertIsNotNone(record.start_time)
+        self.assertGreater(len(record.task_points), 0)
+
+    def test_flight_set_collects_multiple_flights_and_summarises_them(self):
+        paths = [
+            "igc_downloads/open-standard-15m-nationals-2026-husbands-bosworth-2026/15 Metre/2026-08-08/688_10.igc",
+            "igc_downloads/open-standard-15m-nationals-2026-husbands-bosworth-2026/15 Metre/2026-08-09/689_10.igc",
+        ]
+        dataset = FlightSet.from_paths(paths)
+
+        self.assertEqual(dataset.count(), 2)
+        self.assertEqual(len(dataset.by_start_time()), 2)
+        self.assertGreater(dataset.summary()["with_start_time"], 0)
+
+    def test_timeline_state_tracks_time_offsets_and_index(self):
+        path = (
+            "igc_downloads/open-standard-15m-nationals-2026-husbands-bosworth-2026/"
+            "15 Metre/2026-08-08/688_10.igc"
+        )
+        state = TimelineState.from_flight(load_flight_record(path))
+
+        self.assertGreater(state.total_seconds, 0)
+        self.assertEqual(state.index, 0)
+        self.assertEqual(len(state.time_offsets), len(load_flight_record(path).fixes))
+        state.set_index(1)
+        self.assertEqual(state.index, 1)
+
+    def test_scene_state_tracks_selected_flight_and_active_set(self):
+        path = (
+            "igc_downloads/open-standard-15m-nationals-2026-husbands-bosworth-2026/"
+            "15 Metre/2026-08-08/688_10.igc"
+        )
+        flight = load_flight_record(path)
+        state = SceneState()
+
+        state.set_active_flights([flight])
+        state.set_selected_flight(flight)
+        state.set_selected_index(7)
+
+        self.assertIs(state.selected_flight, flight)
+        self.assertEqual(state.selected_index, 7)
+        self.assertEqual(len(state.active_flights), 1)
 
     def test_sector_arc_is_symmetric_about_outward_bisector(self):
         center_lat = 0.0
