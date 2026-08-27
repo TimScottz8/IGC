@@ -8,7 +8,6 @@ from urllib.parse import urlparse
 import libigc
 import pyqtgraph as pg
 import requests
-from bs4 import BeautifulSoup
 from pyproj import CRS, Transformer
 from PySide6.QtCore import QTimer, Qt
 from PySide6.QtGui import QAction
@@ -30,22 +29,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from download_helpers import (
-    DOWNLOAD_ACCEPT,
-    DOWNLOAD_DIR,
-    USER_AGENT,
-    dedupe_contest_links,
-    discover_class_pages,
-    extract_daily_links_from_class_html,
-    extract_day_from_page,
-    extract_day_from_url,
-    fetch_url_for_download,
-    find_candidates,
-    is_download_response_ok,
-    save_stream,
-    sanitize,
-    status_label,
-)
+from download_helpers import DOWNLOAD_DIR, sanitize
 from geo_task import (
     build_sector_split_points,
     extract_finish_sector_from_igc,
@@ -55,93 +39,18 @@ from geo_task import (
     extract_task_sectors_from_igc,
     format_human_readable_datetime,
 )
+from qt_helpers import (
+    build_contest_download_plan,
+    build_contest_result_lines,
+    build_start_time_entries as format_start_time_entries,
+    create_session,
+    download_single_candidate,
+)
 
 
-def build_contest_download_plan(contest_url: str, contest_html: str, base: str, session: requests.Session | None = None) -> list[dict[str, str]]:
-    """Return a flattened list of contest download candidates compatible with the old Streamlit workflow."""
-    session = session or requests.Session()
-    base_url = base or f"{urlparse(contest_url).scheme}://{urlparse(contest_url).netloc}"
-    discovered = discover_class_pages(contest_html, contest_url, base_url, session)
-    plan: list[dict[str, str]] = []
-    seen_links: set[tuple[str, str, str]] = set()
-
-    def record(class_name: str, day: str, link: str) -> None:
-        if not link:
-            return
-        key = (class_name, day, link)
-        if key in seen_links:
-            return
-        seen_links.add(key)
-        plan.append({"class_name": class_name, "day": day, "link": link})
-
-    soup = BeautifulSoup(contest_html, "html.parser")
-    anchor_hrefs: list[str] = []
-    for tag in soup.find_all("a", href=True):
-        href = tag.get("href", "").strip()
-        if href:
-            anchor_hrefs.append(href if href.startswith("http") else f"{base_url}{href}" if href.startswith("/") else href)
-
-    if discovered:
-        for class_name, class_url in discovered:
-            class_label = class_name or sanitize(class_url.rstrip('/').split('/')[-1])
-            class_day_hint = extract_day_from_url(class_url) or "all"
-            if class_day_hint == "all":
-                matching_days = []
-                class_prefix = class_url.rstrip('/').lower()
-                for href in anchor_hrefs:
-                    href_lower = href.lower()
-                    if class_prefix in href_lower:
-                        day = extract_day_from_url(href) or extract_day_from_page(contest_html, href)
-                        if day and day != "day":
-                            matching_days.append(day)
-                if matching_days:
-                    class_day_hint = matching_days[0]
-
-            try:
-                class_response = session.get(class_url, timeout=15)
-                class_response.raise_for_status()
-            except Exception:
-                for link in find_candidates(contest_html, base_url):
-                    record(class_label, str(class_day_hint), link)
-                continue
-
-            daily_links = extract_daily_links_from_class_html(class_response.text, base_url)
-            if daily_links:
-                for daily_link in daily_links:
-                    day = extract_day_from_url(daily_link) or extract_day_from_page(class_response.text, daily_link) or class_day_hint
-                    try:
-                        daily_response = session.get(daily_link, timeout=15)
-                        daily_response.raise_for_status()
-                    except Exception:
-                        continue
-                    for link in find_candidates(daily_response.text, base_url):
-                        record(class_label, str(day), link)
-                continue
-
-            page_day = extract_day_from_url(class_url) or extract_day_from_page(class_response.text, class_url) or class_day_hint
-            for link in find_candidates(class_response.text, base_url):
-                record(class_label, str(page_day), link)
-
-    if not plan:
-        for link in find_candidates(contest_html, base_url):
-            contest_day = extract_day_from_url(contest_url) or extract_day_from_page(contest_html, contest_url) or "all"
-            record("contest", str(contest_day), link)
-
-    return plan
-
-
-def download_single_candidate(session: requests.Session, source_url: str, link: str, destination_dir: str = DOWNLOAD_DIR) -> dict[str, str | None]:
-    fetch = fetch_url_for_download(link)
-    headers = session.headers.copy()
-    headers.update({"Referer": source_url, "Accept": DOWNLOAD_ACCEPT})
-    try:
-        response = session.get(fetch, timeout=30, stream=True, headers=headers)
-        if is_download_response_ok(response, fetch):
-            path = save_stream(response, destination_dir)
-            return {"link": link, "status": "ok", "path": path}
-        return {"link": link, "status": status_label(response), "path": None}
-    except Exception as exc:
-        return {"link": link, "status": f"err {exc}", "path": None}
+# The free functions below are intentionally kept thin so the UI shell stays
+# focused on presentation while the network and discovery logic lives in
+# qt_helpers.py.
 
 
 class MainWindow(QMainWindow):
@@ -270,16 +179,19 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def build_start_time_entries(flights: list[dict[str, str]]) -> list[str]:
+        """Format flight metadata into the rows shown beside the map viewer."""
         entries: list[str] = []
         for item in flights:
             file_path = str(item.get("file_path") or item.get("path") or "unknown.igc")
             start_time = item.get("start_time")
             if not start_time:
                 continue
-            entries.append(f"{os.path.basename(file_path)} — {format_human_readable_datetime(start_time)}")
+            formatted = format_human_readable_datetime(start_time)
+            entries.append(f"{os.path.basename(file_path)} — {formatted}")
         return entries
 
     def refresh_start_time_list(self, flights: list[dict[str, str]]) -> None:
+        """Refresh the start-time list with the latest flight metadata."""
         self.start_times_list.clear()
         entries = self.build_start_time_entries(flights)
         if not entries:
@@ -287,6 +199,36 @@ class MainWindow(QMainWindow):
             return
         for entry in entries:
             self.start_times_list.addItem(entry)
+
+    def _set_empty_track_state(self, status_text: str) -> None:
+        """Reset the plot and playback controls to a clean, empty state."""
+        self.track_item.setData([], [])
+        self.flown_track_item.setData([], [])
+        self.marker_item.setData([], [])
+        self.track_time_offsets = []
+        self.play_button.setEnabled(False)
+        self.pause_button.setEnabled(False)
+        self.reset_button.setEnabled(False)
+        self.speed_combo.setEnabled(False)
+        self.timeline_slider.setEnabled(False)
+        self._set_timeline_slider_value(0)
+        self.timeline_slider.setMaximum(0)
+        self.timeline_label.setText("Time: 00:00:00 / 00:00:00")
+        self.refresh_start_time_list([])
+        self.status_label.setText(status_text)
+
+    def _start_time_for_flight(self, file_path: str, flight) -> str | None:
+        """Return the glider start time for a single IGC file using task metadata."""
+        start_sector = extract_start_sector_from_igc(file_path)
+        task_sectors = extract_task_sectors_from_igc(file_path)
+        turnpoint_sectors = [
+            sector
+            for sector in task_sectors
+            if sector.get("idx") not in {start_sector.get("idx") if start_sector else None, None}
+            and sector.get("idx") is not None
+        ]
+        first_turnpoint_sector = min(turnpoint_sectors, key=lambda sector: int(sector.get("idx", 10**9))) if turnpoint_sectors else None
+        return extract_glider_start_time(flight.fixes, start_sector, first_turnpoint_sector)
 
     def open_igc_file(self) -> None:
         file_path, _ = QFileDialog.getOpenFileName(
@@ -300,6 +242,7 @@ class MainWindow(QMainWindow):
             self.render_static_track(file_path)
 
     def discover_contest(self) -> None:
+        """Fetch a contest page and populate the download queue for the selected classes."""
         contest_url = self.contest_url_input.text().strip()
         if not contest_url or "soaringspot.com" not in contest_url:
             self.contest_results.setPlainText("Enter a valid SoaringSpot contest URL first.")
@@ -307,8 +250,7 @@ class MainWindow(QMainWindow):
             return
 
         try:
-            session = requests.Session()
-            session.headers.update({"User-Agent": USER_AGENT})
+            session = create_session()
             response = session.get(contest_url, timeout=20)
             response.raise_for_status()
             base = f"{urlparse(contest_url).scheme}://{urlparse(contest_url).netloc}"
@@ -325,17 +267,12 @@ class MainWindow(QMainWindow):
             self.download_contest_button.setEnabled(False)
             return
 
-        lines = [
-            f"{item['class_name']} | {item['day']} | {item['link']}"
-            for item in plan[:50]
-        ]
-        if len(plan) > 50:
-            lines.append(f"... and {len(plan) - 50} more links")
-        self.contest_results.setPlainText("\n".join(lines))
+        self.contest_results.setPlainText("\n".join(build_contest_result_lines(plan)))
         self.download_contest_button.setEnabled(True)
         self.status_label.setText(f"Status: discovered {len(plan)} contest flight links")
 
     def download_contest(self) -> None:
+        """Download all discovered contest links into a class/day directory layout."""
         if not self.contest_download_plan:
             self.contest_results.setPlainText("Discover a contest first before downloading files.")
             return
@@ -345,8 +282,7 @@ class MainWindow(QMainWindow):
             self.contest_results.setPlainText("No contest URL is available to download from.")
             return
 
-        session = requests.Session()
-        session.headers.update({"User-Agent": USER_AGENT})
+        session = create_session()
         base_dir = os.path.join(DOWNLOAD_DIR, "contest")
         os.makedirs(base_dir, exist_ok=True)
 
@@ -364,6 +300,7 @@ class MainWindow(QMainWindow):
         self.status_label.setText(f"Status: downloaded {sum(1 for item in self.contest_download_plan if item)} contest entries")
 
     def render_static_track(self, file_path: str) -> None:
+        """Load one IGC file, extract metadata, and draw the corresponding map view."""
         self.timer.stop()
         self.last_tick_monotonic = None
         self.status_label.setText("Status: loading file...")
@@ -371,74 +308,27 @@ class MainWindow(QMainWindow):
         try:
             flight = libigc.Flight.create_from_file(file_path)
         except Exception as exc:
-            self.status_label.setText(f"Status: failed to parse file ({exc})")
-            self.track_item.setData([], [])
-            self.flown_track_item.setData([], [])
-            self.marker_item.setData([], [])
-            self.track_time_offsets = []
-            self.play_button.setEnabled(False)
-            self.pause_button.setEnabled(False)
-            self.reset_button.setEnabled(False)
-            self.speed_combo.setEnabled(False)
-            self.timeline_slider.setEnabled(False)
-            self._set_timeline_slider_value(0)
-            self.timeline_slider.setMaximum(0)
-            self.timeline_label.setText("Time: 00:00:00 / 00:00:00")
-            self.refresh_start_time_list([])
+            self._set_empty_track_state(f"Status: failed to parse file ({exc})")
             return
 
         if not flight.valid:
-            self.status_label.setText("Status: parsed file is marked invalid")
-            self.track_item.setData([], [])
-            self.flown_track_item.setData([], [])
-            self.marker_item.setData([], [])
-            self.track_time_offsets = []
-            self.play_button.setEnabled(False)
-            self.pause_button.setEnabled(False)
-            self.reset_button.setEnabled(False)
-            self.speed_combo.setEnabled(False)
-            self.timeline_slider.setEnabled(False)
-            self._set_timeline_slider_value(0)
-            self.timeline_slider.setMaximum(0)
-            self.timeline_label.setText("Time: 00:00:00 / 00:00:00")
-            self.refresh_start_time_list([])
+            self._set_empty_track_state("Status: parsed file is marked invalid")
             return
 
         try:
-            start_sector = extract_start_sector_from_igc(file_path)
-            task_sectors = extract_task_sectors_from_igc(file_path)
-            turnpoint_sectors = [
-                sector
-                for sector in task_sectors
-                if sector.get("idx") not in {start_sector.get("idx") if start_sector else None, None}
-                and sector.get("idx") is not None
-            ]
-            first_turnpoint_sector = min(turnpoint_sectors, key=lambda sector: int(sector.get("idx", 10**9))) if turnpoint_sectors else None
-            start_time = extract_glider_start_time(flight.fixes, start_sector, first_turnpoint_sector)
-            self.refresh_start_time_list([{"file_path": file_path, "start_time": start_time or (flight.fixes[0].timestamp if flight.fixes else None)}])
+            start_time = self._start_time_for_flight(file_path, flight)
+            self.refresh_start_time_list([
+                {"file_path": file_path, "start_time": start_time or (flight.fixes[0].timestamp if flight.fixes else None)}
+            ])
 
             self.track_lons = [fix.lon for fix in flight.fixes]
             self.track_lats = [fix.lat for fix in flight.fixes]
             if not self.track_lons or not self.track_lats:
-                self.status_label.setText("Status: no valid fixes found")
-                self.track_item.setData([], [])
-                self.flown_track_item.setData([], [])
-                self.marker_item.setData([], [])
-                self.track_time_offsets = []
-                self.play_button.setEnabled(False)
-                self.pause_button.setEnabled(False)
-                self.reset_button.setEnabled(False)
-                self.speed_combo.setEnabled(False)
-                self.timeline_slider.setEnabled(False)
-                self._set_timeline_slider_value(0)
-                self.timeline_slider.setMaximum(0)
-                self.timeline_label.setText("Time: 00:00:00 / 00:00:00")
-                self.refresh_start_time_list([])
+                self._set_empty_track_state("Status: no valid fixes found")
                 return
 
             self._configure_projection(self.track_lons, self.track_lats)
             self.track_xs, self.track_ys = self._project_lon_lat_lists(self.track_lons, self.track_lats)
-
             self.track_time_offsets = self._build_time_offsets(flight.fixes)
 
             self.track_item.setData(self.track_xs, self.track_ys)
@@ -461,19 +351,7 @@ class MainWindow(QMainWindow):
 
             self._render_static_overlays(file_path)
         except Exception as exc:
-            self.track_item.setData([], [])
-            self.flown_track_item.setData([], [])
-            self.marker_item.setData([], [])
-            self.track_time_offsets = []
-            self.play_button.setEnabled(False)
-            self.pause_button.setEnabled(False)
-            self.reset_button.setEnabled(False)
-            self.speed_combo.setEnabled(False)
-            self.timeline_slider.setEnabled(False)
-            self._set_timeline_slider_value(0)
-            self.timeline_slider.setMaximum(0)
-            self.timeline_label.setText("Time: 00:00:00 / 00:00:00")
-            self.status_label.setText(f"Status: failed to render track ({exc})")
+            self._set_empty_track_state(f"Status: failed to render track ({exc})")
 
     def _clear_static_overlays(self) -> None:
         for item in self.static_overlay_items:
