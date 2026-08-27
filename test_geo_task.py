@@ -1,5 +1,8 @@
 import unittest
 
+from PySide6.QtWidgets import QApplication
+
+from qt_app import MainWindow, build_contest_download_plan
 from map_helpers import GliderTrace
 from geo_task import (
     _bearing_between_points,
@@ -19,6 +22,25 @@ from geo_task import (
 
 
 class SectorGeometryTests(unittest.TestCase):
+    def test_build_contest_download_plan_discovers_classes_and_day_links(self):
+        contest_html = """
+        <html><body>
+            <a href="/en_gb/contest/results/15-meter">15 Metre</a>
+            <a href="/en_gb/contest/results/15-meter/day/2026-08-08">2026-08-08</a>
+            <a href="/download-contest-flight/abc123?dl=1">download</a>
+        </body></html>
+        """
+        plan = build_contest_download_plan(
+            "https://www.soaringspot.com/en_gb/contest/results",
+            contest_html,
+            "https://www.soaringspot.com",
+        )
+
+        self.assertTrue(plan)
+        self.assertIn("15 Metre", [item["class_name"] for item in plan])
+        self.assertTrue(any(item["day"] == "2026-08-08" for item in plan))
+        self.assertTrue(any("download-contest-flight" in item["link"] for item in plan))
+
     def test_glider_trace_exposes_task_zone_metadata(self):
         path = (
             "igc_downloads/open-standard-15m-nationals-2026-husbands-bosworth-2026/"
@@ -35,6 +57,16 @@ class SectorGeometryTests(unittest.TestCase):
         self.assertIsNotNone(trace.get_sectors())
         self.assertIsNotNone(trace.get_zone_fix_mask())
         self.assertIsNotNone(trace.get_task_route())
+
+    def test_main_window_builds_start_time_entries_for_single_flight(self):
+        app = QApplication.instance() or QApplication([])
+        window = MainWindow()
+        entries = window.build_start_time_entries([
+            {"file_path": "sample.igc", "start_time": "2024-01-01T10:00:00Z"},
+        ])
+
+        self.assertEqual(entries, ["sample.igc — 2024-01-01 10:00:00 UTC"])
+        app.quit()
 
     def test_sector_arc_is_symmetric_about_outward_bisector(self):
         center_lat = 0.0

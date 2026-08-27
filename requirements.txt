@@ -156,7 +156,6 @@ six==1.17.0
 soupsieve==2.8.3
 ssh-import-id==5.11
 starlette==1.6.0
-streamlit==1.62.0
 systemd-python==235
 tinycss2==1.5.1
 toml==0.10.2

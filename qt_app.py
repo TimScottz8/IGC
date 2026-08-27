@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import os
 import sys
 import time
+from urllib.parse import urlparse
 
 import libigc
 import pyqtgraph as pg
+import requests
+from bs4 import BeautifulSoup
 from pyproj import CRS, Transformer
 from PySide6.QtCore import QTimer, Qt
 from PySide6.QtGui import QAction
@@ -14,20 +18,130 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
+    QListWidget,
     QMainWindow,
+    QMessageBox,
     QPushButton,
+    QPlainTextEdit,
     QSlider,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
+from download_helpers import (
+    DOWNLOAD_ACCEPT,
+    DOWNLOAD_DIR,
+    USER_AGENT,
+    dedupe_contest_links,
+    discover_class_pages,
+    extract_daily_links_from_class_html,
+    extract_day_from_page,
+    extract_day_from_url,
+    fetch_url_for_download,
+    find_candidates,
+    is_download_response_ok,
+    save_stream,
+    sanitize,
+    status_label,
+)
 from geo_task import (
     build_sector_split_points,
     extract_finish_sector_from_igc,
+    extract_glider_start_time,
     extract_start_sector_from_igc,
     extract_task_points_from_igc,
     extract_task_sectors_from_igc,
+    format_human_readable_datetime,
 )
+
+
+def build_contest_download_plan(contest_url: str, contest_html: str, base: str, session: requests.Session | None = None) -> list[dict[str, str]]:
+    """Return a flattened list of contest download candidates compatible with the old Streamlit workflow."""
+    session = session or requests.Session()
+    base_url = base or f"{urlparse(contest_url).scheme}://{urlparse(contest_url).netloc}"
+    discovered = discover_class_pages(contest_html, contest_url, base_url, session)
+    plan: list[dict[str, str]] = []
+    seen_links: set[tuple[str, str, str]] = set()
+
+    def record(class_name: str, day: str, link: str) -> None:
+        if not link:
+            return
+        key = (class_name, day, link)
+        if key in seen_links:
+            return
+        seen_links.add(key)
+        plan.append({"class_name": class_name, "day": day, "link": link})
+
+    soup = BeautifulSoup(contest_html, "html.parser")
+    anchor_hrefs: list[str] = []
+    for tag in soup.find_all("a", href=True):
+        href = tag.get("href", "").strip()
+        if href:
+            anchor_hrefs.append(href if href.startswith("http") else f"{base_url}{href}" if href.startswith("/") else href)
+
+    if discovered:
+        for class_name, class_url in discovered:
+            class_label = class_name or sanitize(class_url.rstrip('/').split('/')[-1])
+            class_day_hint = extract_day_from_url(class_url) or "all"
+            if class_day_hint == "all":
+                matching_days = []
+                class_prefix = class_url.rstrip('/').lower()
+                for href in anchor_hrefs:
+                    href_lower = href.lower()
+                    if class_prefix in href_lower:
+                        day = extract_day_from_url(href) or extract_day_from_page(contest_html, href)
+                        if day and day != "day":
+                            matching_days.append(day)
+                if matching_days:
+                    class_day_hint = matching_days[0]
+
+            try:
+                class_response = session.get(class_url, timeout=15)
+                class_response.raise_for_status()
+            except Exception:
+                for link in find_candidates(contest_html, base_url):
+                    record(class_label, str(class_day_hint), link)
+                continue
+
+            daily_links = extract_daily_links_from_class_html(class_response.text, base_url)
+            if daily_links:
+                for daily_link in daily_links:
+                    day = extract_day_from_url(daily_link) or extract_day_from_page(class_response.text, daily_link) or class_day_hint
+                    try:
+                        daily_response = session.get(daily_link, timeout=15)
+                        daily_response.raise_for_status()
+                    except Exception:
+                        continue
+                    for link in find_candidates(daily_response.text, base_url):
+                        record(class_label, str(day), link)
+                continue
+
+            page_day = extract_day_from_url(class_url) or extract_day_from_page(class_response.text, class_url) or class_day_hint
+            for link in find_candidates(class_response.text, base_url):
+                record(class_label, str(page_day), link)
+
+    if not plan:
+        for link in find_candidates(contest_html, base_url):
+            contest_day = extract_day_from_url(contest_url) or extract_day_from_page(contest_html, contest_url) or "all"
+            record("contest", str(contest_day), link)
+
+    return plan
+
+
+def download_single_candidate(session: requests.Session, source_url: str, link: str, destination_dir: str = DOWNLOAD_DIR) -> dict[str, str | None]:
+    fetch = fetch_url_for_download(link)
+    headers = session.headers.copy()
+    headers.update({"Referer": source_url, "Accept": DOWNLOAD_ACCEPT})
+    try:
+        response = session.get(fetch, timeout=30, stream=True, headers=headers)
+        if is_download_response_ok(response, fetch):
+            path = save_stream(response, destination_dir)
+            return {"link": link, "status": "ok", "path": path}
+        return {"link": link, "status": status_label(response), "path": None}
+    except Exception as exc:
+        return {"link": link, "status": f"err {exc}", "path": None}
 
 
 class MainWindow(QMainWindow):
@@ -36,11 +150,44 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("IGC Desktop Viewer")
         self.resize(1000, 700)
 
-        central = QWidget(self)
-        layout = QVBoxLayout(central)
-        layout.addWidget(QLabel("PySide6 shell is running."))
+        self.tabs = QTabWidget(self)
+
+        self.download_tab = QWidget(self)
+        self.viewer_tab = QWidget(self)
+        self.tabs.addTab(self.download_tab, "Download")
+        self.tabs.addTab(self.viewer_tab, "Flight viewer")
+        self.setCentralWidget(self.tabs)
+
+        download_layout = QVBoxLayout(self.download_tab)
+        download_layout.addWidget(QLabel("SoaringSpot contest download"))
+        self.contest_url_input = QLineEdit()
+        self.contest_url_input.setPlaceholderText("https://www.soaringspot.com/en_gb/contest/...")
+        download_layout.addWidget(self.contest_url_input)
+        contest_buttons = QHBoxLayout()
+        self.discover_contest_button = QPushButton("Discover contest")
+        self.download_contest_button = QPushButton("Download contest files")
+        self.download_contest_button.setEnabled(False)
+        self.discover_contest_button.clicked.connect(self.discover_contest)
+        self.download_contest_button.clicked.connect(self.download_contest)
+        contest_buttons.addWidget(self.discover_contest_button)
+        contest_buttons.addWidget(self.download_contest_button)
+        download_layout.addLayout(contest_buttons)
+        self.contest_results = QPlainTextEdit()
+        self.contest_results.setReadOnly(True)
+        self.contest_results.setPlaceholderText("Contest discovery output appears here.")
+        download_layout.addWidget(self.contest_results)
+
+        viewer_layout = QVBoxLayout(self.viewer_tab)
+        viewer_layout.addWidget(QLabel("PySide6 shell is running."))
         self.selected_file_label = QLabel("Selected file: none")
-        layout.addWidget(self.selected_file_label)
+        viewer_layout.addWidget(self.selected_file_label)
+
+        self.start_times_label = QLabel("Start times")
+        viewer_layout.addWidget(self.start_times_label)
+        self.start_times_list = QListWidget()
+        self.start_times_list.setMaximumHeight(120)
+        self.start_times_list.addItem("No start time available")
+        viewer_layout.addWidget(self.start_times_list)
 
         self.plot_widget = pg.PlotWidget()
         self.plot_widget.setBackground("w")
@@ -60,7 +207,7 @@ class MainWindow(QMainWindow):
             symbolSize=10,
         )
         self.static_overlay_items: list = []
-        layout.addWidget(self.plot_widget, stretch=1)
+        viewer_layout.addWidget(self.plot_widget, stretch=1)
 
         controls_layout = QHBoxLayout()
         self.play_button = QPushButton("Play")
@@ -83,7 +230,7 @@ class MainWindow(QMainWindow):
         controls_layout.addWidget(self.speed_label)
         controls_layout.addWidget(self.speed_combo)
         controls_layout.addStretch(1)
-        layout.addLayout(controls_layout)
+        viewer_layout.addLayout(controls_layout)
 
         timeline_layout = QHBoxLayout()
         self.timeline_slider = QSlider(Qt.Orientation.Horizontal)
@@ -95,12 +242,12 @@ class MainWindow(QMainWindow):
         self.timeline_label = QLabel("Time: 00:00:00 / 00:00:00")
         timeline_layout.addWidget(self.timeline_slider, stretch=1)
         timeline_layout.addWidget(self.timeline_label)
-        layout.addLayout(timeline_layout)
+        viewer_layout.addLayout(timeline_layout)
 
         self.status_label = QLabel("Status: waiting for file")
-        layout.addWidget(self.status_label)
-        self.setCentralWidget(central)
+        viewer_layout.addWidget(self.status_label)
 
+        self.contest_download_plan: list[dict[str, str]] = []
         self.track_lons: list[float] = []
         self.track_lats: list[float] = []
         self.track_xs: list[float] = []
@@ -121,6 +268,26 @@ class MainWindow(QMainWindow):
         open_action.triggered.connect(self.open_igc_file)
         file_menu.addAction(open_action)
 
+    @staticmethod
+    def build_start_time_entries(flights: list[dict[str, str]]) -> list[str]:
+        entries: list[str] = []
+        for item in flights:
+            file_path = str(item.get("file_path") or item.get("path") or "unknown.igc")
+            start_time = item.get("start_time")
+            if not start_time:
+                continue
+            entries.append(f"{os.path.basename(file_path)} — {format_human_readable_datetime(start_time)}")
+        return entries
+
+    def refresh_start_time_list(self, flights: list[dict[str, str]]) -> None:
+        self.start_times_list.clear()
+        entries = self.build_start_time_entries(flights)
+        if not entries:
+            self.start_times_list.addItem("No start time available")
+            return
+        for entry in entries:
+            self.start_times_list.addItem(entry)
+
     def open_igc_file(self) -> None:
         file_path, _ = QFileDialog.getOpenFileName(
             self,
@@ -131,6 +298,70 @@ class MainWindow(QMainWindow):
         if file_path:
             self.selected_file_label.setText(f"Selected file: {file_path}")
             self.render_static_track(file_path)
+
+    def discover_contest(self) -> None:
+        contest_url = self.contest_url_input.text().strip()
+        if not contest_url or "soaringspot.com" not in contest_url:
+            self.contest_results.setPlainText("Enter a valid SoaringSpot contest URL first.")
+            self.download_contest_button.setEnabled(False)
+            return
+
+        try:
+            session = requests.Session()
+            session.headers.update({"User-Agent": USER_AGENT})
+            response = session.get(contest_url, timeout=20)
+            response.raise_for_status()
+            base = f"{urlparse(contest_url).scheme}://{urlparse(contest_url).netloc}"
+            plan = build_contest_download_plan(contest_url, response.text, base, session)
+        except Exception as exc:
+            self.contest_results.setPlainText(f"Failed to discover contest: {exc}")
+            self.contest_download_plan = []
+            self.download_contest_button.setEnabled(False)
+            return
+
+        self.contest_download_plan = plan
+        if not plan:
+            self.contest_results.setPlainText("No direct IGC download links were discovered for that contest page.")
+            self.download_contest_button.setEnabled(False)
+            return
+
+        lines = [
+            f"{item['class_name']} | {item['day']} | {item['link']}"
+            for item in plan[:50]
+        ]
+        if len(plan) > 50:
+            lines.append(f"... and {len(plan) - 50} more links")
+        self.contest_results.setPlainText("\n".join(lines))
+        self.download_contest_button.setEnabled(True)
+        self.status_label.setText(f"Status: discovered {len(plan)} contest flight links")
+
+    def download_contest(self) -> None:
+        if not self.contest_download_plan:
+            self.contest_results.setPlainText("Discover a contest first before downloading files.")
+            return
+
+        contest_url = self.contest_url_input.text().strip()
+        if not contest_url:
+            self.contest_results.setPlainText("No contest URL is available to download from.")
+            return
+
+        session = requests.Session()
+        session.headers.update({"User-Agent": USER_AGENT})
+        base_dir = os.path.join(DOWNLOAD_DIR, "contest")
+        os.makedirs(base_dir, exist_ok=True)
+
+        lines: list[str] = []
+        for index, item in enumerate(self.contest_download_plan, start=1):
+            out_dir = os.path.join(base_dir, sanitize(str(item["class_name"])), sanitize(str(item["day"])))
+            os.makedirs(out_dir, exist_ok=True)
+            result = download_single_candidate(session, contest_url, item["link"], out_dir)
+            if result["status"] == "ok":
+                lines.append(f"{index}/{len(self.contest_download_plan)} OK {result['path']}")
+            else:
+                lines.append(f"{index}/{len(self.contest_download_plan)} {result['status']}")
+
+        self.contest_results.setPlainText("\n".join(lines))
+        self.status_label.setText(f"Status: downloaded {sum(1 for item in self.contest_download_plan if item)} contest entries")
 
     def render_static_track(self, file_path: str) -> None:
         self.timer.stop()
@@ -153,6 +384,7 @@ class MainWindow(QMainWindow):
             self._set_timeline_slider_value(0)
             self.timeline_slider.setMaximum(0)
             self.timeline_label.setText("Time: 00:00:00 / 00:00:00")
+            self.refresh_start_time_list([])
             return
 
         if not flight.valid:
@@ -169,9 +401,22 @@ class MainWindow(QMainWindow):
             self._set_timeline_slider_value(0)
             self.timeline_slider.setMaximum(0)
             self.timeline_label.setText("Time: 00:00:00 / 00:00:00")
+            self.refresh_start_time_list([])
             return
 
         try:
+            start_sector = extract_start_sector_from_igc(file_path)
+            task_sectors = extract_task_sectors_from_igc(file_path)
+            turnpoint_sectors = [
+                sector
+                for sector in task_sectors
+                if sector.get("idx") not in {start_sector.get("idx") if start_sector else None, None}
+                and sector.get("idx") is not None
+            ]
+            first_turnpoint_sector = min(turnpoint_sectors, key=lambda sector: int(sector.get("idx", 10**9))) if turnpoint_sectors else None
+            start_time = extract_glider_start_time(flight.fixes, start_sector, first_turnpoint_sector)
+            self.refresh_start_time_list([{"file_path": file_path, "start_time": start_time or (flight.fixes[0].timestamp if flight.fixes else None)}])
+
             self.track_lons = [fix.lon for fix in flight.fixes]
             self.track_lats = [fix.lat for fix in flight.fixes]
             if not self.track_lons or not self.track_lats:
@@ -188,6 +433,7 @@ class MainWindow(QMainWindow):
                 self._set_timeline_slider_value(0)
                 self.timeline_slider.setMaximum(0)
                 self.timeline_label.setText("Time: 00:00:00 / 00:00:00")
+                self.refresh_start_time_list([])
                 return
 
             self._configure_projection(self.track_lons, self.track_lats)

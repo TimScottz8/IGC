@@ -1,7 +1,48 @@
+import warnings
+
+import libigc
 import pandas as pd
 import plotly.graph_objects as go
-import streamlit as st
-import libigc
+
+
+class _UiCompat:
+    @staticmethod
+    def warning(*args, **kwargs):
+        warnings.warn(str(args[0]) if args else "warning")
+
+    @staticmethod
+    def error(*args, **kwargs):
+        warnings.warn(str(args[0]) if args else "error")
+
+    @staticmethod
+    def text_input(*args, **kwargs):
+        return kwargs.get("value", "")
+
+    @staticmethod
+    def plotly_chart(*args, **kwargs):
+        return None
+
+    @staticmethod
+    def caption(*args, **kwargs):
+        return None
+
+    @staticmethod
+    def write(*args, **kwargs):
+        return None
+
+    @staticmethod
+    def expander(*args, **kwargs):
+        class _Expander:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        return _Expander()
+
+
+ui = _UiCompat()
 
 MAP_TRACE = getattr(go, "Scattermapbox", go.Scattermap)
 MAP_LAYOUT_KEY = "mapbox" if hasattr(go, "Scattermapbox") else "map"
@@ -47,14 +88,14 @@ class GliderTrace:
         try:
             self.flight = libigc.Flight.create_from_file(self.file_path)
         except Exception as exc:
-            st.error(f"Could not parse IGC file: {exc}")
+            ui.error(f"Could not parse IGC file: {exc}")
             self.flight = None
             return
 
         if not self.flight.valid:
-            st.error("This file was parsed but marked invalid by the IGC library.")
+            ui.error("This file was parsed but marked invalid by the IGC library.")
             if self.flight.notes:
-                st.write(self.flight.notes[:5])
+                ui.write(self.flight.notes[:5])
             self.flight = None
             return
 
@@ -68,7 +109,7 @@ class GliderTrace:
         self.finish_sector = extract_finish_sector_from_igc(self.file_path)
 
         if self.trace_df.empty:
-            st.warning("No valid flight fixes were found in the selected file.")
+            ui.warning("No valid flight fixes were found in the selected file.")
             return
 
         self.lat_center = float(self.trace_df["lat"].mean())
@@ -153,7 +194,7 @@ def _build_trace(file_path: str):
 
 def plot_traces_on_map(traces):
     if not traces:
-        st.warning("No traces to plot.")
+        ui.warning("No traces to plot.")
         return
 
     fig = go.Figure()
@@ -347,7 +388,7 @@ def plot_traces_on_map(traces):
                 )
 
     if not lat_values or not lon_values:
-        st.warning("No valid trace data available to plot.")
+        ui.warning("No valid trace data available to plot.")
         return
 
     layout_args = {
@@ -360,7 +401,7 @@ def plot_traces_on_map(traces):
         "legend": {"x": 0.01, "y": 0.99, "xanchor": "left", "yanchor": "top"},
     }
     fig.update_layout(**layout_args)
-    st.plotly_chart(fig, use_container_width=True)
+    ui.plotly_chart(fig, use_container_width=True)
 
 
 def render_igc_map(file_path: str):
@@ -368,7 +409,7 @@ def render_igc_map(file_path: str):
     if trace is None or trace.flight is None:
         return None
 
-    st.text_input(
+    ui.text_input(
         "Glider start time",
         value=format_human_readable_datetime(trace.get_start_time()),
         key="glider_start_time",
@@ -551,11 +592,11 @@ def render_igc_map(file_path: str):
     }
     fig.update_layout(**layout_args)
 
-    st.plotly_chart(fig, use_container_width=True)
-    st.caption(f"Flight fixes: {len(trace.trace_df)} | Task points: {len(trace.task_df)}")
+    ui.plotly_chart(fig, use_container_width=True)
+    ui.caption(f"Flight fixes: {len(trace.trace_df)} | Task points: {len(trace.task_df)}")
 
     if trace.flight.notes:
-        with st.expander("Flight parsing notes"):
-            st.write(trace.flight.notes[:10])
+        with ui.expander("Flight parsing notes"):
+            ui.write(trace.flight.notes[:10])
 
     return trace
