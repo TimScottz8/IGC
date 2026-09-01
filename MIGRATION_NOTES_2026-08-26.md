@@ -3,89 +3,44 @@
 ## Goal
 Migrate the slow Streamlit animation workflow to a single-process Python desktop app using PySide6 + pyqtgraph, with incremental testable steps.
 
-## Environment and Dependencies
-Installed in project virtual environment:
-- PySide6
-- pyqtgraph
-- pyproj
+## Historical Summary
 
-## What Was Implemented Today
+This file records the milestone where the project stopped being primarily a Streamlit animation experiment and became a Qt desktop application.
 
-### 1) Desktop shell bootstrap
-- Added a standalone desktop entrypoint in `qt_app.py`.
-- Confirmed instant startup.
+Key outcomes from the migration:
+- introduced the standalone Qt entrypoint in `qt_app.py`
+- moved flight loading and playback into a responsive desktop workflow
+- added 2D rendering, timeline scrubbing, speed controls, and seek interaction
+- overlaid task route plus start, finish, and turnpoint sectors
+- corrected map geometry through local projection and equal-axis scaling
+- hardened the load/render path against timestamp and UI regressions
 
-### 2) File open workflow
-- Added File -> Open IGC action.
-- Displays selected file path in the UI.
+## Lasting Impact
 
-### 3) Static track rendering
-- Added libigc parsing on file open.
-- Renders static flight track.
+The Qt migration established the base that the current app still builds on:
+- local desktop startup instead of the older Streamlit loop
+- timestamp-driven playback
+- task-aware 2D visualisation
+- a code path that is easier to refactor safely toward multi-flight analysis
 
-### 4) High performance animation loop
-- Added Play/Pause/Reset controls.
-- Kept full track static.
-- Per-frame updates only:
-  - flown track segment
-  - glider marker
+## Current checkpoint
+The current work has moved beyond the migration milestone and into the real contest-analysis phase:
+- dynamic multi-flight selection is supported
+- per-flight markers and recent trails are visible in the same scene
+- playback time is preserved while selecting or deselecting gliders
+- thermal-only gaggle detection is in place as the current analytical layer
 
-### 5) Speed controls
-- Added multipliers:
-  - 1x
-  - 5x
-  - 10x
-  - 30x
-  - 60x
-  - 120x
+This is the current product checkpoint that should be treated as the baseline for the next phase of development.
 
-### 6) Timestamp-based playback
-- Switched from frame-step playback to fix timestamp playback.
-- 1x now means real elapsed fix timing.
-- Multipliers scale simulated clock from that baseline.
+## Follow-on Direction
 
-### 7) Click/seek interaction
-- Added double-click on plot to jump marker to nearest fix.
-- Works while paused.
+The later project direction expanded beyond this migration milestone:
+- downloader integration was added to the desktop workflow
+- multi-flight loading and selection became part of the active refactor
+- the product goal shifted more clearly toward contest-analysis rather than playback alone
+- thermal gaggle detection is now the immediate analysis focus for the next implementation step
 
-### 8) Static task and sector overlays
-- Added task route overlay.
-- Added start/finish/turnpoint sector overlays.
-- Overlays are static and do not update per frame.
-
-### 9) Projection/scaling correction
-- Replaced raw lon/lat plotting with local projected coordinates.
-- Uses local azimuthal equidistant projection centered on flight.
-- Plot uses equal axis scaling (1:1) to avoid visual distortion.
-
-### 10) Timeline scrubber
-- Added slider for time/index scrubbing.
-- Added elapsed/total time label.
-- Slider updates during playback and supports drag-to-seek.
-
-## Bugs Found and Fixed During Migration
-- Fixed timestamp type mismatch from libigc (float timestamps vs datetime assumption).
-- Added safer error/status reporting in load/render path.
-- Fixed indentation regression causing `NameError: name 'self' is not defined` in jump_to_index.
-
-## Current Behavior Summary
-- Loads IGC file and renders track quickly.
-- Playback is smooth and timestamp-driven.
-- Speed, slider scrub, and double-click seek all work.
-- Task and sector overlays are visible and static.
-
-## Recommended Next Steps
-1. Add info panel:
-   - current fix timestamp
-   - flight start time
-   - estimated groundspeed
-   - current task leg
-2. Add jump buttons:
-   - jump to start
-   - jump to first sector entry
-   - jump to finish
-3. Add parse/overlay cache keyed by file path + modified time for instant reopen.
-4. Add a second desktop tab/panel for downloader integration.
+For current priorities, see `README.md`, `Pathway.md`, and `Progress.md`.
 
 ## Run Command
 `/home/tim/Projects/Gaggles/.venv/bin/python /home/tim/Projects/Gaggles/qt_app.py`

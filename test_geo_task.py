@@ -1,12 +1,16 @@
 import os
+import threading
+import time
 import unittest
+from unittest.mock import patch
 
 from PySide6.QtWidgets import QApplication, QTreeWidget
 
 from qt_app import MainWindow, build_contest_download_plan
 from qt_helpers import build_contest_result_lines
 from map_helpers import GliderTrace
-from flight_model import FlightRecord, load_flight_record
+from flight_model import FlightRecord, load_flight_record, serialize_flight_record
+from qt_viewer import recent_track_window_for_record
 from flight_set import FlightSet
 from scene_state import SceneState
 from timeline_state import TimelineState
@@ -27,7 +31,54 @@ from geo_task import (
 )
 
 
+def process_events_until(predicate, timeout_seconds: float = 10.0) -> None:
+    app = QApplication.instance() or QApplication([])
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        app.processEvents()
+        if predicate():
+            return
+    raise AssertionError("Timed out waiting for Qt work to finish")
+
+
+def sample_payload(file_path: str) -> dict:
+    return {
+        "file_path": file_path,
+        "valid": True,
+        "fixes": [
+            {"lat": 52.0, "lon": -1.0, "timestamp": 0.0},
+            {"lat": 52.01, "lon": -0.99, "timestamp": 60.0},
+        ],
+        "task_points": [],
+        "task_sectors": [],
+        "start_sector": None,
+        "finish_sector": None,
+        "start_time": "2024-01-01T10:00:00Z",
+    }
+
+
 class SectorGeometryTests(unittest.TestCase):
+    def test_recent_track_window_uses_each_flight_timeline(self):
+        primary = FlightRecord(file_path="primary.igc", valid=True, fixes=[
+            type("Fix", (), {"lat": 51.0, "lon": -1.0, "timestamp": 0.0})(),
+            type("Fix", (), {"lat": 51.1, "lon": -0.9, "timestamp": 60.0})(),
+            type("Fix", (), {"lat": 51.2, "lon": -0.8, "timestamp": 120.0})(),
+        ])
+        secondary = FlightRecord(file_path="secondary.igc", valid=True, fixes=[
+            type("Fix", (), {"lat": 52.0, "lon": -1.0, "timestamp": 0.0})(),
+            type("Fix", (), {"lat": 52.1, "lon": -0.9, "timestamp": 20.0})(),
+            type("Fix", (), {"lat": 52.2, "lon": -0.8, "timestamp": 40.0})(),
+            type("Fix", (), {"lat": 52.3, "lon": -0.7, "timestamp": 60.0})(),
+        ])
+
+        primary_start, primary_end = recent_track_window_for_record(primary, 1, 30.0, total_seconds=120.0)
+        secondary_start, secondary_end = recent_track_window_for_record(secondary, 3, 30.0, total_seconds=60.0)
+
+        self.assertEqual(primary_start, 0)
+        self.assertEqual(primary_end, 1)
+        self.assertEqual(secondary_start, 1)
+        self.assertEqual(secondary_end, 3)
+
     def test_build_contest_download_plan_discovers_classes_and_day_links(self):
         contest_html = """
         <html><body>
@@ -125,6 +176,15 @@ class SectorGeometryTests(unittest.TestCase):
         self.assertTrue(hasattr(window, "download_progress"))
         app.quit()
 
+    def test_main_window_uses_dedicated_download_and_viewer_controllers(self):
+        app = QApplication.instance() or QApplication([])
+        window = MainWindow()
+
+        self.assertIs(window.download_controller.window, window)
+        self.assertIs(window.flight_load_controller.window, window)
+        self.assertIs(window.flight_render_controller.window, window)
+        app.quit()
+
     def test_main_window_download_selection_tracks_class_day_and_flight_scope(self):
         app = QApplication.instance() or QApplication([])
         window = MainWindow()
@@ -155,6 +215,39 @@ class SectorGeometryTests(unittest.TestCase):
         self.assertEqual(len(window._selected_download_plan()), 1)
         app.quit()
 
+    def test_main_window_disables_conflicting_actions_while_downloading(self):
+        app = QApplication.instance() or QApplication([])
+        window = MainWindow()
+        window.contest_download_plan = [{"class_name": "15 Metre", "day": "2026-08-08", "link": "/download/a"}]
+        window.contest_root_name = "Contest"
+        window.contest_url_input.setText("https://www.soaringspot.com/en_gb/contest/results")
+
+        started = threading.Event()
+        release = threading.Event()
+
+        def controlled_download(*args, **kwargs):
+            started.set()
+            release.wait(timeout=5.0)
+            return {"link": "/download/a", "status": "ok", "path": "igc_downloads/test.igc"}
+
+        with (
+            patch("qt_controllers.download_single_candidate", side_effect=controlled_download),
+            patch("qt_controllers.QMessageBox.information", return_value=None),
+        ):
+            window.download_contest()
+            process_events_until(lambda: started.is_set())
+            self.assertFalse(window.open_igc_action.isEnabled())
+            self.assertFalse(window.local_contests.isEnabled())
+            self.assertFalse(window.cancel_download_button.isHidden())
+            self.assertTrue(window.cancel_download_button.isEnabled())
+            release.set()
+
+        process_events_until(lambda: window.download_controller._download_thread is None)
+        self.assertTrue(window.open_igc_action.isEnabled())
+        self.assertTrue(window.local_contests.isEnabled())
+        window.close()
+        app.quit()
+
     def test_main_window_can_open_multiple_igc_files(self):
         app = QApplication.instance() or QApplication([])
         window = MainWindow()
@@ -164,10 +257,139 @@ class SectorGeometryTests(unittest.TestCase):
         ]
 
         window.render_static_tracks(paths)
+        process_events_until(lambda: len(window.scene_state.active_flights) == 2 and window.timeline is not None)
 
         self.assertEqual(len(window.scene_state.active_flights), 2)
         self.assertEqual(window.scene_state.selected_flight.file_path, paths[0])
         self.assertIsNotNone(window.timeline)
+        window.close()
+        app.quit()
+
+    def test_main_window_open_multiple_igc_files_uses_async_loader_when_uncached(self):
+        app = QApplication.instance() or QApplication([])
+        window = MainWindow()
+        paths = [
+            "igc_downloads/open-standard-15m-nationals-2026-husbands-bosworth-2026/15 Metre/2026-08-08/688_10.igc",
+            "igc_downloads/open-standard-15m-nationals-2026-husbands-bosworth-2026/15 Metre/2026-08-09/689_10.igc",
+        ]
+
+        started = threading.Event()
+        release = threading.Event()
+
+        payloads_by_path = {
+            path: sample_payload(path)
+            for path in paths
+        }
+
+        def controlled_request(file_path: str):
+            started.set()
+            release.wait(timeout=5.0)
+            return payloads_by_path[file_path]
+
+        with patch.object(window.flight_load_controller.parser_service, "load_record_payload", side_effect=controlled_request):
+            window.render_static_tracks(paths)
+            process_events_until(lambda: started.is_set())
+            self.assertIsNotNone(window.flight_load_controller._load_thread)
+            release.set()
+
+        process_events_until(lambda: window.flight_load_controller._load_thread is None)
+        window.close()
+        app.quit()
+
+    def test_main_window_disables_conflicting_actions_while_flight_loading(self):
+        app = QApplication.instance() or QApplication([])
+        window = MainWindow()
+        path = "igc_downloads/open-standard-15m-nationals-2026-husbands-bosworth-2026/15 Metre/2026-08-08/688_10.igc"
+
+        started = threading.Event()
+        release = threading.Event()
+        payload = sample_payload(path)
+
+        def controlled_request(file_path: str):
+            started.set()
+            release.wait(timeout=5.0)
+            return payload
+
+        with patch.object(window.flight_load_controller.parser_service, "load_record_payload", side_effect=controlled_request):
+            window.render_static_tracks([path])
+            process_events_until(lambda: started.is_set())
+            self.assertFalse(window.open_igc_action.isEnabled())
+            self.assertFalse(window.local_contests.isEnabled())
+            self.assertFalse(window.cancel_flight_loading_button.isHidden())
+            self.assertTrue(window.cancel_flight_loading_button.isEnabled())
+            release.set()
+
+        process_events_until(lambda: window.flight_load_controller._load_thread is None)
+        self.assertTrue(window.open_igc_action.isEnabled())
+        self.assertTrue(window.local_contests.isEnabled())
+        window.close()
+        app.quit()
+
+    def test_main_window_can_cancel_flight_loading_after_current_file(self):
+        app = QApplication.instance() or QApplication([])
+        window = MainWindow()
+        path = "igc_downloads/open-standard-15m-nationals-2026-husbands-bosworth-2026/15 Metre/2026-08-08/688_10.igc"
+
+        started = threading.Event()
+        release = threading.Event()
+        payload = sample_payload(path)
+
+        def controlled_request(file_path: str):
+            started.set()
+            release.wait(timeout=5.0)
+            return payload
+
+        with patch.object(window.flight_load_controller.parser_service, "load_record_payload", side_effect=controlled_request):
+            window.render_static_tracks([path, path])
+            process_events_until(lambda: started.is_set())
+            window.cancel_flight_loading()
+            self.assertFalse(window.cancel_flight_loading_button.isEnabled())
+            self.assertIn("cancelling flight loading", window.status_label.text().lower())
+            release.set()
+
+        process_events_until(lambda: window.flight_load_controller._load_thread is None)
+        self.assertIn("cancelled flight loading", window.status_label.text().lower())
+        window.close()
+        app.quit()
+
+    def test_main_window_shows_current_file_name_while_loading(self):
+        app = QApplication.instance() or QApplication([])
+        window = MainWindow()
+        path = "igc_downloads/open-standard-15m-nationals-2026-husbands-bosworth-2026/15 Metre/2026-08-08/688_10.igc"
+
+        started = threading.Event()
+        release = threading.Event()
+        payload = sample_payload(path)
+
+        def controlled_request(file_path: str):
+            started.set()
+            release.wait(timeout=5.0)
+            return payload
+
+        with patch.object(window.flight_load_controller.parser_service, "load_record_payload", side_effect=controlled_request):
+            window.render_static_tracks([path])
+            process_events_until(lambda: started.is_set())
+            release.set()
+            process_events_until(lambda: "688_10.igc" in window.status_label.text())
+
+        process_events_until(lambda: window.flight_load_controller._load_thread is None)
+        window.close()
+        app.quit()
+
+    def test_main_window_renders_overlays_from_cached_flight_record(self):
+        app = QApplication.instance() or QApplication([])
+        window = MainWindow()
+        path = (
+            "igc_downloads/open-standard-15m-nationals-2026-husbands-bosworth-2026/"
+            "15 Metre/2026-08-08/688_10.igc"
+        )
+
+        record = window._cache_or_load_flight_record(path)
+        window.render_static_track(path)
+
+        self.assertGreater(len(record.task_points), 0)
+        self.assertGreater(len(window.static_overlay_items), 0)
+        self.assertIs(window.scene_state.selected_flight, record)
         app.quit()
 
     def test_main_window_lists_downloaded_contests_from_local_dir(self):
@@ -203,8 +425,33 @@ class SectorGeometryTests(unittest.TestCase):
         first_file.setSelected(True)
         second_file.setSelected(True)
         self.assertEqual(len(window._selected_start_time_flight_paths()), 2)
-        window._render_selected_start_times()
+        process_events_until(lambda: len(window.scene_state.active_flights) == 2)
         self.assertEqual(len(window.scene_state.active_flights), 2)
+        self.assertGreaterEqual(len(window.visible_flight_markers), 2)
+        window.close()
+        app.quit()
+
+    def test_main_window_preserves_playback_time_when_reselecting_flights(self):
+        app = QApplication.instance() or QApplication([])
+        window = MainWindow()
+        path = (
+            "igc_downloads/open-standard-15m-nationals-2026-husbands-bosworth-2026/"
+            "15 Metre/2026-08-08/688_10.igc"
+        )
+
+        record = window._cache_or_load_flight_record(path)
+        window.track_lons = record.lons
+        window.track_lats = record.lats
+        window.track_xs, window.track_ys = window._project_lon_lat_lists(window.track_lons, window.track_lats)
+        window.track_time_offsets = TimelineState.from_flight(record).time_offsets
+        window.current_index = max(1, min(10, len(window.track_time_offsets) - 1))
+        window.sim_elapsed_seconds = window.track_time_offsets[window.current_index]
+
+        window._render_loaded_record(record, active_records=[record])
+
+        self.assertEqual(window.current_index, max(1, min(10, len(window.track_time_offsets) - 1)))
+        self.assertAlmostEqual(window.sim_elapsed_seconds, window.track_time_offsets[window.current_index], places=6)
+        window.close()
         app.quit()
 
     def test_main_window_caches_loaded_flight_records_for_fast_selection(self):

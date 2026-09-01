@@ -3,11 +3,8 @@ from __future__ import annotations
 import os
 import sys
 import time
-from urllib.parse import urlparse
 
-import libigc
 import pyqtgraph as pg
-import requests
 from pyproj import CRS, Transformer
 from PySide6.QtCore import QTimer, Qt
 from PySide6.QtGui import QAction
@@ -20,7 +17,6 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
-    QMessageBox,
     QProgressBar,
     QPushButton,
     QSlider,
@@ -31,35 +27,23 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from download_helpers import DOWNLOAD_DIR, sanitize
 from flight_loader import FlightCache
-from flight_model import load_flight_record
+from gaggle_analysis import active_thermal_gaggles
+from qt_controllers import DownloadController
+from qt_status import StatusController
+from qt_viewer import FlightLoadController, FlightRenderController
 from scene_state import SceneState
-from timeline_state import TimelineState
 from geo_task import (
     build_sector_split_points,
-    extract_finish_sector_from_igc,
-    extract_glider_start_time,
-    extract_start_sector_from_igc,
-    extract_task_points_from_igc,
-    extract_task_sectors_from_igc,
 )
 from qt_helpers import (
     build_contest_download_plan,
-    build_contest_tree_items,
-    build_local_contest_tree_items,
     build_start_time_entries as format_start_time_entries,
-    contest_name_from_url,
-    create_session,
-    download_single_candidate,
     group_start_time_entries,
-    iter_downloaded_igc_paths,
     normalize_file_selection,
-    selected_download_plan_items,
     selected_files_label,
-    selected_local_flight_paths,
-    selected_start_time_paths,
 )
+from timeline_state import TimelineState
 
 
 # The free functions below are intentionally kept thin so the UI shell stays
@@ -89,11 +73,16 @@ class MainWindow(QMainWindow):
         contest_buttons = QHBoxLayout()
         self.discover_contest_button = QPushButton("Discover contest")
         self.download_contest_button = QPushButton("Download contest files")
+        self.cancel_download_button = QPushButton("Cancel download")
+        self.cancel_download_button.setEnabled(False)
+        self.cancel_download_button.setVisible(False)
         self.download_contest_button.setEnabled(False)
         self.discover_contest_button.clicked.connect(self.discover_contest)
         self.download_contest_button.clicked.connect(self.download_contest)
+        self.cancel_download_button.clicked.connect(self.cancel_download)
         contest_buttons.addWidget(self.discover_contest_button)
         contest_buttons.addWidget(self.download_contest_button)
+        contest_buttons.addWidget(self.cancel_download_button)
         download_layout.addLayout(contest_buttons)
         self.download_progress = QProgressBar()
         self.download_progress.setRange(0, 100)
@@ -126,7 +115,6 @@ class MainWindow(QMainWindow):
         self.local_contests.setIndentation(16)
         self.local_contests.setMaximumHeight(220)
         self.local_contests.itemSelectionChanged.connect(self._update_local_selection_label)
-        self.refresh_local_contest_tree()
         download_layout.addWidget(self.local_contests)
 
         local_buttons = QHBoxLayout()
@@ -174,6 +162,8 @@ class MainWindow(QMainWindow):
         )
         self.static_overlay_items: list = []
         self.extra_track_items: list = []
+        self.gaggle_overlay_items: list = []
+        self.visible_flight_markers: list = []
 
         self.secondary_plot_widget = self.plot_widget
 
@@ -214,8 +204,17 @@ class MainWindow(QMainWindow):
         timeline_layout.addWidget(self.timeline_label)
         viewer_layout.addLayout(timeline_layout)
 
-        self.status_label = QLabel("Status: waiting for file")
+        self.status_label = QLabel("")
         viewer_layout.addWidget(self.status_label)
+
+        flight_progress_buttons = QHBoxLayout()
+        self.cancel_flight_loading_button = QPushButton("Cancel loading")
+        self.cancel_flight_loading_button.setEnabled(False)
+        self.cancel_flight_loading_button.setVisible(False)
+        self.cancel_flight_loading_button.clicked.connect(self.cancel_flight_loading)
+        flight_progress_buttons.addStretch(1)
+        flight_progress_buttons.addWidget(self.cancel_flight_loading_button)
+        viewer_layout.addLayout(flight_progress_buttons)
 
         self.flight_loading_progress = QProgressBar()
         self.flight_loading_progress.setRange(0, 100)
@@ -231,23 +230,36 @@ class MainWindow(QMainWindow):
         self.track_xs: list[float] = []
         self.track_ys: list[float] = []
         self.track_time_offsets: list[float] = []
-        self.timeline: TimelineState | None = None
+        self.recent_track_seconds = 30.0
+        self.timeline = None
         self.scene_state = SceneState()
         self.geo_to_local: Transformer | None = None
         self.current_index = 0
         self.sim_elapsed_seconds = 0.0
         self.last_tick_monotonic: float | None = None
         self.timeline_internal_update = False
-        self._rendering_selected_start_times = False
         self.timer = QTimer(self)
         self.timer.setInterval(16)
         self.timer.timeout.connect(self.on_tick)
         self.plot_widget.scene().sigMouseClicked.connect(self.on_plot_mouse_clicked)
 
+        self.status_controller = StatusController(
+            self.status_label,
+            self.flight_loading_progress,
+            self.download_progress,
+        )
+        self.download_controller = DownloadController(self)
+        self.flight_load_controller = FlightLoadController(self)
+        self.flight_render_controller = FlightRenderController(self, self.flight_load_controller)
+        self.viewer_controller = self.flight_render_controller
+        self.status_controller.waiting_for_file()
+        self.refresh_local_contest_tree()
+
         file_menu = self.menuBar().addMenu("File")
         open_action = QAction("Open IGC...", self)
         open_action.triggered.connect(self.open_igc_file)
         file_menu.addAction(open_action)
+        self.open_igc_action = open_action
 
     @staticmethod
     def build_start_time_entries(flights: list[dict[str, str]]) -> list[str]:
@@ -288,93 +300,19 @@ class MainWindow(QMainWindow):
 
     def _load_records_for_paths(self, file_paths: list[str], *, switch_to_viewer: bool = True) -> list:
         """Load each selected flight once, showing progress while the cache is populated."""
-        unique_paths = normalize_file_selection(file_paths)
-        if not unique_paths:
-            return []
+        return self.flight_load_controller.load_records_for_paths(file_paths)
 
-        self.flight_loading_progress.setRange(0, len(unique_paths))
-        self.flight_loading_progress.setValue(0)
-        self.flight_loading_progress.setVisible(True)
-        self.status_label.setText(f"Status: loading {len(unique_paths)} flight(s)...")
-
-        records: list = []
-        for index, file_path in enumerate(unique_paths, start=1):
-            record = self._cache_or_load_flight_record(file_path)
-            if record.valid and record.flight is not None:
-                records.append(record)
-            self.flight_loading_progress.setValue(index)
-            QApplication.processEvents()
-
-        self.flight_loading_progress.setVisible(False)
-        self.flight_loading_progress.setValue(0)
-        self.status_label.setText(
-            f"Status: ready to view {len(records)} flight(s)"
-            if records
-            else "Status: no valid flights were loaded"
-        )
-        if switch_to_viewer and records:
-            self.tabs.setCurrentWidget(self.viewer_tab)
-        return records
-
-    def _set_empty_track_state(self, status_text: str) -> None:
+    def _set_empty_track_state(self, status_text: str | None = None) -> None:
         """Reset the plot and playback controls to a clean, empty state."""
-        self.track_item.setData([], [])
-        self.flown_track_item.setData([], [])
-        self.marker_item.setData([], [])
-        for item in self.extra_track_items:
-            self.plot_widget.removeItem(item)
-        self.extra_track_items = []
-        self.track_time_offsets = []
-        self.play_button.setEnabled(False)
-        self.pause_button.setEnabled(False)
-        self.reset_button.setEnabled(False)
-        self.speed_combo.setEnabled(False)
-        self.timeline_slider.setEnabled(False)
-        self._set_timeline_slider_value(0)
-        self.timeline_slider.setMaximum(0)
-        self.timeline_label.setText("Time: 00:00:00 / 00:00:00")
-        if not self._rendering_selected_start_times:
-            self.refresh_start_time_list([])
-        self.status_label.setText(status_text)
+        self.flight_render_controller.set_empty_track_state()
+        if status_text:
+            self.status_controller.set_text(status_text)
 
     def _selected_start_time_flight_paths(self) -> list[str]:
-        return selected_start_time_paths(self.start_times_tree.selectedItems())
+        return self.flight_render_controller.selected_start_time_flight_paths()
 
     def _render_selected_start_times(self) -> None:
-        if self._rendering_selected_start_times:
-            return
-        file_paths = self._selected_start_time_flight_paths()
-        if not file_paths:
-            return
-        self._rendering_selected_start_times = True
-        try:
-            records: list = []
-            for file_path in file_paths:
-                record = self._cache_or_load_flight_record(file_path)
-                if record.valid and record.flight is not None:
-                    records.append(record)
-            if not records:
-                self.status_label.setText("Status: no valid flights were loaded")
-                return
-            self.scene_state.set_active_flights(records)
-            self.scene_state.set_selected_flight(records[0])
-            self.scene_state.set_selected_index(0)
-            self.render_static_track(records[0].file_path, active_records=records)
-        finally:
-            self._rendering_selected_start_times = False
-
-    def _start_time_for_flight(self, file_path: str, flight) -> str | None:
-        """Return the glider start time for a single IGC file using task metadata."""
-        start_sector = extract_start_sector_from_igc(file_path)
-        task_sectors = extract_task_sectors_from_igc(file_path)
-        turnpoint_sectors = [
-            sector
-            for sector in task_sectors
-            if sector.get("idx") not in {start_sector.get("idx") if start_sector else None, None}
-            and sector.get("idx") is not None
-        ]
-        first_turnpoint_sector = min(turnpoint_sectors, key=lambda sector: int(sector.get("idx", 10**9))) if turnpoint_sectors else None
-        return extract_glider_start_time(flight.fixes, start_sector, first_turnpoint_sector)
+        self.flight_render_controller.render_selected_start_times()
 
     def open_igc_file(self) -> None:
         file_paths, _ = QFileDialog.getOpenFileNames(
@@ -396,265 +334,140 @@ class MainWindow(QMainWindow):
 
     def discover_contest(self) -> None:
         """Fetch a contest page and populate the download queue for the selected classes."""
-        contest_url = self.contest_url_input.text().strip()
-        if not contest_url or "soaringspot.com" not in contest_url:
-            self.contest_results.clear()
-            self.contest_results.addTopLevelItem(QTreeWidgetItem(["Enter a valid SoaringSpot contest URL first."]))
-            self.download_contest_button.setEnabled(False)
-            return
-
-        try:
-            session = create_session()
-            response = session.get(contest_url, timeout=20)
-            response.raise_for_status()
-            base = f"{urlparse(contest_url).scheme}://{urlparse(contest_url).netloc}"
-            plan = build_contest_download_plan(contest_url, response.text, base, session)
-        except Exception as exc:
-            self.contest_results.clear()
-            self.contest_results.addTopLevelItem(QTreeWidgetItem([f"Failed to discover contest: {exc}"]))
-            self.contest_download_plan = []
-            self.download_contest_button.setEnabled(False)
-            return
-
-        self.contest_download_plan = plan
-        self.contest_root_name = contest_name_from_url(contest_url)
-        if not plan:
-            self.contest_results.clear()
-            self.contest_results.addTopLevelItem(QTreeWidgetItem(["No direct IGC download links were discovered for that contest page."]))
-            self.download_contest_button.setEnabled(False)
-            return
-
-        self._render_contest_tree(plan)
-        self.download_contest_button.setEnabled(True)
-        self.status_label.setText(f"Status: discovered {len(plan)} contest flight links")
+        self.download_controller.start_discover_contest()
 
     def _update_download_button_label(self, item: QTreeWidgetItem | None = None) -> None:
-        selected = item if item is not None else self.contest_results.currentItem()
-        if selected is None:
-            self.download_contest_button.setText("Download contest files")
-            return
-
-        kind = selected.data(0, Qt.ItemDataRole.UserRole)
-        if kind == "class":
-            self.download_contest_button.setText(f"Download {selected.text(0)}")
-        elif kind == "day":
-            self.download_contest_button.setText(f"Download {selected.text(0)}")
-        elif kind == "link":
-            self.download_contest_button.setText("Download flight")
-        else:
-            self.download_contest_button.setText("Download contest files")
+        self.download_controller.update_download_button_label(item)
 
     def _selected_download_plan(self) -> list[dict[str, str]]:
-        return selected_download_plan_items(self.contest_results.selectedItems(), self.contest_download_plan)
+        return self.download_controller.selected_download_plan()
 
     def _render_contest_tree(self, plan: list[dict[str, str]]) -> None:
         """Render discovered contest links as a collapsible tree grouped by class and then day."""
-        self.contest_results.clear()
-        contest_root = build_contest_tree_items(self.contest_root_name, plan)[0]
-        self.contest_results.addTopLevelItem(contest_root)
-        self.contest_results.expandToDepth(0)
-        self.contest_results.setCurrentItem(contest_root)
+        self.download_controller.render_contest_tree(plan)
 
     def _iter_downloaded_contest_paths(self) -> list[str]:
-        return iter_downloaded_igc_paths(DOWNLOAD_DIR)
+        return self.download_controller.iter_downloaded_contest_paths()
 
     def _selected_local_flight_paths(self) -> list[str]:
-        return selected_local_flight_paths(self.local_contests.selectedItems())
+        return self.download_controller.selected_local_flight_paths()
 
     def _update_local_selection_label(self) -> None:
-        selected_paths = self._selected_local_flight_paths()
-        if not selected_paths:
-            self.local_selection_label.setText("Selected: 0 flights")
-            return
-        count = len(selected_paths)
-        label = "flight" if count == 1 else "flights"
-        self.local_selection_label.setText(f"Selected: {count} {label}")
+        self.download_controller.update_local_selection_label()
 
     def refresh_local_contest_tree(self) -> None:
-        self.local_contests.clear()
-        contest_paths = self._iter_downloaded_contest_paths()
-        if not contest_paths:
-            self.local_contests.addTopLevelItem(QTreeWidgetItem(["No downloaded contests available."]))
-            return
-
-        for contest_item in build_local_contest_tree_items(contest_paths):
-            self.local_contests.addTopLevelItem(contest_item)
-
-        self.local_contests.expandToDepth(0)
-        self._update_local_selection_label()
+        self.download_controller.refresh_local_contest_tree()
 
     def open_selected_local_flights(self) -> None:
-        file_paths = self._selected_local_flight_paths()
-        if not file_paths:
-            self.status_label.setText("Status: no downloaded contest flights selected")
-            return
-        self.open_igc_files(file_paths)
+        self.download_controller.open_selected_local_flights()
+
+    def cancel_download(self) -> None:
+        self.download_controller.cancel_download()
 
     def download_contest(self) -> None:
         """Download the currently selected contest/class/day/flight subtree."""
-        if not self.contest_download_plan:
-            self.contest_results.clear()
-            self.contest_results.addTopLevelItem(QTreeWidgetItem(["Discover a contest first before downloading files."]))
-            return
-
-        contest_url = self.contest_url_input.text().strip()
-        if not contest_url:
-            self.contest_results.clear()
-            self.contest_results.addTopLevelItem(QTreeWidgetItem(["No contest URL is available to download from."]))
-            return
-
-        selection = self._selected_download_plan()
-        if not selection:
-            selection = list(self.contest_download_plan)
-
-        session = create_session()
-        contest_name = self.contest_root_name or "contest"
-        base_dir = os.path.join(DOWNLOAD_DIR, sanitize(contest_name))
-        os.makedirs(base_dir, exist_ok=True)
-
-        total = len(selection)
-        self.download_progress.setVisible(True)
-        self.download_progress.setRange(0, total)
-        self.download_progress.setValue(0)
-        self.status_label.setText(f"Status: downloading {total} contest entries")
-
-        lines: list[str] = []
-        for index, item in enumerate(selection, start=1):
-            out_dir = os.path.join(base_dir, sanitize(str(item["class_name"])), sanitize(str(item["day"])))
-            os.makedirs(out_dir, exist_ok=True)
-            result = download_single_candidate(session, contest_url, item["link"], out_dir)
-            if result["status"] == "ok":
-                lines.append(f"{index}/{len(selection)} OK {result['path']}")
-            else:
-                lines.append(f"{index}/{len(selection)} {result['status']}")
-            self.download_progress.setValue(index)
-            QApplication.processEvents()
-
-        self.contest_results.clear()
-        for line in lines:
-            self.contest_results.addTopLevelItem(QTreeWidgetItem([line]))
-        self.download_progress.setValue(total)
-        self.refresh_local_contest_tree()
-        self.status_label.setText(f"Status: downloaded {len(selection)} contest entries")
-        QMessageBox.information(self, "Download complete", f"Downloaded {len(selection)} flight(s) to {base_dir}")
+        self.download_controller.start_download_contest()
 
     def render_static_tracks(self, file_paths: list[str]) -> None:
         """Load each IGC file once, cache it, and keep the first as the active primary track."""
-        if not file_paths:
-            return
-
-        records = self._load_records_for_paths(file_paths, switch_to_viewer=True)
-        if not records:
-            if self._rendering_selected_start_times:
-                self.status_label.setText("Status: no valid flights were loaded")
-                return
-            self._set_empty_track_state("Status: no valid flights were loaded")
-            return
-
-        self.scene_state.set_active_flights(records)
-        self.scene_state.set_selected_flight(records[0])
-        self.scene_state.set_selected_index(0)
-        if not self._rendering_selected_start_times:
-            self.refresh_start_time_list([
-                {
-                    "file_path": record.file_path,
-                    "start_time": record.start_time or (record.fixes[0].timestamp if record.fixes else None),
-                }
-                for record in records
-            ])
-
-        self.render_static_track(records[0].file_path, active_records=records)
+        self.flight_render_controller.render_static_tracks(file_paths)
 
     def render_static_track(self, file_path: str, active_records: list | None = None) -> None:
         """Load one IGC file, extract metadata, and draw the corresponding map view."""
-        self.timer.stop()
-        self.last_tick_monotonic = None
-        self.status_label.setText("Status: loading file...")
-        self._clear_static_overlays()
+        self.flight_render_controller.render_static_track(file_path, active_records=active_records)
 
-        try:
-            record = self._cache_or_load_flight_record(file_path)
-        except Exception as exc:
-            if self._rendering_selected_start_times:
-                self.status_label.setText(f"Status: failed to parse {file_path} ({exc})")
-                return
-            self._set_empty_track_state(f"Status: failed to parse file ({exc})")
-            return
+    def cancel_flight_loading(self) -> None:
+        self.flight_load_controller.cancel_loading()
 
-        if not record.valid or record.flight is None:
-            if self._rendering_selected_start_times:
-                self.status_label.setText(f"Status: parsed file is marked invalid ({file_path})")
-                return
-            self._set_empty_track_state("Status: parsed file is marked invalid")
-            return
+    def set_download_busy(self, is_busy: bool, *, allow_cancel: bool = False) -> None:
+        self.discover_contest_button.setEnabled(not is_busy)
+        self.download_contest_button.setEnabled(not is_busy and bool(self.contest_download_plan))
+        self.cancel_download_button.setVisible(is_busy)
+        self.cancel_download_button.setEnabled(is_busy and allow_cancel)
+        self.contest_url_input.setEnabled(not is_busy)
+        self.contest_results.setEnabled(not is_busy)
+        self.local_contests.setEnabled(not is_busy)
+        self.open_local_contest_button.setEnabled(not is_busy)
+        self.start_times_tree.setEnabled(not is_busy)
+        self.open_igc_action.setEnabled(not is_busy)
 
-        try:
-            start_time = record.start_time or (record.fixes[0].timestamp if record.fixes else None)
-            if active_records is None:
-                active_records = [record]
-                if not self._rendering_selected_start_times:
-                    self.refresh_start_time_list([
-                        {"file_path": file_path, "start_time": start_time}
-                    ])
-            self.scene_state.set_active_flights(active_records)
-            self.scene_state.set_selected_flight(record)
-            self.scene_state.set_selected_index(0)
-
-            self.track_lons = record.lons
-            self.track_lats = record.lats
-            if not self.track_lons or not self.track_lats:
-                self._set_empty_track_state("Status: no valid fixes found")
-                return
-
-            self.timeline = TimelineState.from_flight(record)
-            self._configure_projection(self.track_lons, self.track_lats)
-            self.track_xs, self.track_ys = self._project_lon_lat_lists(self.track_lons, self.track_lats)
-            self.track_time_offsets = self.timeline.time_offsets
-
-            for item in self.extra_track_items:
-                self.plot_widget.removeItem(item)
-            self.extra_track_items = []
-            if len(active_records) > 1:
-                colors = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b"]
-                for index, extra_record in enumerate(active_records[1:], start=1):
-                    extra_xs, extra_ys = self._project_lon_lat_lists(extra_record.lons, extra_record.lats)
-                    extra_item = self.plot_widget.plot(
-                        extra_xs,
-                        extra_ys,
-                        pen=pg.mkPen(color=colors[(index - 1) % len(colors)], width=1.5),
-                    )
-                    self.extra_track_items.append(extra_item)
-
-            self.track_item.setData(self.track_xs, self.track_ys)
-            self.current_index = 0
-            self.sim_elapsed_seconds = 0.0
-            self.flown_track_item.setData([self.track_xs[0]], [self.track_ys[0]])
-            self.marker_item.setData([self.track_xs[0]], [self.track_ys[0]])
-            self.plot_widget.enableAutoRange()
-            self.play_button.setEnabled(True)
-            self.pause_button.setEnabled(True)
-            self.reset_button.setEnabled(True)
-            self.speed_combo.setEnabled(True)
-            self.timeline_slider.setEnabled(True)
-            self.timeline_slider.setMaximum(max(0, len(self.track_xs) - 1))
-            self._set_timeline_slider_value(0)
-            self.timeline_label.setText(
-                f"Time: 00:00:00 / {self._format_seconds(self.track_time_offsets[-1] if self.track_time_offsets else 0.0)}"
-            )
-            self.status_label.setText(
-                f"Status: rendered static track ({len(self.track_lons)} fixes)"
-                if len(active_records) == 1
-                else f"Status: rendered {len(active_records)} active flights; selected {os.path.basename(file_path)}"
-            )
-
-            self._render_static_overlays(file_path)
-        except Exception as exc:
-            self._set_empty_track_state(f"Status: failed to render track ({exc})")
+    def set_flight_loading_busy(self, is_busy: bool, *, allow_cancel: bool = False) -> None:
+        self.cancel_flight_loading_button.setVisible(is_busy)
+        self.cancel_flight_loading_button.setEnabled(is_busy and allow_cancel)
+        self.discover_contest_button.setEnabled(not is_busy)
+        self.download_contest_button.setEnabled(not is_busy and bool(self.contest_download_plan))
+        self.contest_url_input.setEnabled(not is_busy)
+        self.contest_results.setEnabled(not is_busy)
+        self.local_contests.setEnabled(not is_busy)
+        self.open_local_contest_button.setEnabled(not is_busy)
+        self.start_times_tree.setEnabled(not is_busy)
+        self.open_igc_action.setEnabled(not is_busy)
 
     def _clear_static_overlays(self) -> None:
         for item in self.static_overlay_items:
             self.plot_widget.removeItem(item)
         self.static_overlay_items = []
+
+    def _clear_visible_flight_markers(self) -> None:
+        for item in self.visible_flight_markers:
+            try:
+                self.plot_widget.removeItem(item)
+            except Exception:
+                pass
+        self.visible_flight_markers = []
+
+    def _clear_gaggle_overlays(self) -> None:
+        for item in self.gaggle_overlay_items:
+            try:
+                self.plot_widget.removeItem(item)
+            except Exception:
+                pass
+        self.gaggle_overlay_items = []
+
+    def _render_active_gaggles(self) -> None:
+        self._clear_gaggle_overlays()
+        flights = self.scene_state.active_flights
+        if len(flights) < 2:
+            return
+        if not self.track_xs:
+            return
+
+        current_time = self.track_time_offsets[self.current_index] if self.track_time_offsets else float(self.current_index)
+        clusters = active_thermal_gaggles(flights, current_time)
+        for cluster in clusters:
+            centroid = cluster["centroid"]
+            xs, ys = self._project_lon_lat_lists([centroid["lon"]], [centroid["lat"]])
+            if not xs or not ys:
+                continue
+            centroid_item = pg.ScatterPlotItem(
+                [xs[0]],
+                [ys[0]],
+                pen=pg.mkPen(color="#ff4d4d", width=2),
+                brush=pg.mkBrush("#ff4d4d"),
+                size=18 + cluster["size"] * 4,
+                symbol="o",
+            )
+            self.plot_widget.addItem(centroid_item)
+            self.gaggle_overlay_items.append(centroid_item)
+
+            member_points = []
+            for member in cluster["members"]:
+                m_xs, m_ys = self._project_lon_lat_lists([member["lon"]], [member["lat"]])
+                if not m_xs or not m_ys:
+                    continue
+                member_points.append((m_xs[0], m_ys[0]))
+            if not member_points:
+                continue
+            member_item = pg.ScatterPlotItem(
+                [point[0] for point in member_points],
+                [point[1] for point in member_points],
+                pen=pg.mkPen(color="#ffd166", width=2),
+                brush=pg.mkBrush("#ffd166"),
+                size=12 + cluster["size"] * 2,
+                symbol="o",
+            )
+            self.plot_widget.addItem(member_item)
+            self.gaggle_overlay_items.append(member_item)
 
     def _add_overlay_line(self, lons: list[float], lats: list[float], color: str, width: int = 2) -> None:
         if not lons or not lats:
@@ -663,14 +476,11 @@ class MainWindow(QMainWindow):
         item = self.plot_widget.plot(xs, ys, pen=pg.mkPen(color=color, width=width))
         self.static_overlay_items.append(item)
 
-    def _render_static_overlays(self, file_path: str) -> None:
-        try:
-            task_points = extract_task_points_from_igc(file_path)
-            task_sectors = extract_task_sectors_from_igc(file_path)
-            start_sector = extract_start_sector_from_igc(file_path)
-            finish_sector = extract_finish_sector_from_igc(file_path)
-        except Exception:
-            return
+    def _render_static_overlays(self, record) -> None:
+        task_points = record.task_points
+        task_sectors = record.task_sectors
+        start_sector = record.start_sector
+        finish_sector = record.finish_sector
 
         if task_points:
             route_lons = [float(point["lon"]) for point in task_points if "lon" in point and "lat" in point]
@@ -790,7 +600,7 @@ class MainWindow(QMainWindow):
         if self.current_index >= len(self.track_xs) - 1:
             self.timer.stop()
             self.last_tick_monotonic = None
-            self.status_label.setText(f"Status: complete ({len(self.track_xs)} / {len(self.track_xs)})")
+            self.status_controller.playback_complete(len(self.track_xs), len(self.track_xs))
             return
 
         now = time.monotonic()
@@ -808,10 +618,9 @@ class MainWindow(QMainWindow):
             target_index += 1
 
         self.current_index = target_index
-        end = self.current_index + 1
-        self.flown_track_item.setData(self.track_xs[:end], self.track_ys[:end])
-        self.marker_item.setData([self.track_xs[self.current_index]], [self.track_ys[self.current_index]])
-        self.status_label.setText(f"Status: frame {end} / {len(self.track_xs)}")
+        self._render_recent_track_view()
+        self._render_active_gaggles()
+        self.status_controller.playback_frame(self.current_index + 1, len(self.track_xs))
 
     def current_speed_multiplier(self) -> int:
         label = self.speed_combo.currentText().strip().lower()
@@ -822,6 +631,63 @@ class MainWindow(QMainWindow):
         except ValueError:
             return 1
         return max(1, value)
+
+    def _recent_track_indices(self, current_index: int) -> tuple[int, int]:
+        if not self.track_time_offsets:
+            return max(0, current_index - 10), current_index
+
+        duration = max(self.track_time_offsets[-1], 1.0)
+        lookback_seconds = min(float(self.recent_track_seconds), duration)
+        window_points = max(2, int((lookback_seconds / duration) * max(len(self.track_time_offsets) - 1, 1)))
+        start_index = max(0, current_index - window_points)
+        return start_index, current_index
+
+    def _render_recent_track_view(self) -> None:
+        if not self.track_xs:
+            return
+        start_index, end_index = self._recent_track_indices(self.current_index)
+        trail_xs = self.track_xs[start_index:end_index + 1]
+        trail_ys = self.track_ys[start_index:end_index + 1]
+        self.track_item.setData(trail_xs, trail_ys)
+        self.flown_track_item.setData(trail_xs, trail_ys)
+        self.marker_item.setData([self.track_xs[self.current_index]], [self.track_ys[self.current_index]])
+
+        if not self.scene_state.active_flights:
+            self._clear_visible_flight_markers()
+            return
+
+        colors = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b"]
+        self._clear_visible_flight_markers()
+        for index, flight in enumerate(self.scene_state.active_flights):
+            if not getattr(flight, "lons", None) or not getattr(flight, "lats", None):
+                continue
+            fix_count = len(flight.lons)
+            if fix_count == 0:
+                continue
+            flight_timeline = TimelineState.from_flight(flight)
+            flight_offsets = flight_timeline.time_offsets
+            local_total = max(float(flight_timeline.total_seconds), 1.0)
+            active_index = 0
+            if len(flight_offsets) > 1 and self.sim_elapsed_seconds > 0:
+                active_index = min(
+                    len(flight_offsets) - 1,
+                    max(0, int((self.sim_elapsed_seconds / local_total) * (len(flight_offsets) - 1))),
+                )
+            lon = float(flight.lons[active_index]) if active_index < len(flight.lons) else float(flight.lons[-1])
+            lat = float(flight.lats[active_index]) if active_index < len(flight.lats) else float(flight.lats[-1])
+            px, py = self._project_lon_lat_lists([lon], [lat])
+            if not px or not py:
+                continue
+            item = pg.ScatterPlotItem(
+                [px[0]],
+                [py[0]],
+                pen=pg.mkPen(color=colors[index % len(colors)], width=2),
+                brush=pg.mkBrush(colors[index % len(colors)]),
+                size=8 if index > 0 else 10,
+                symbol="o",
+            )
+            self.plot_widget.addItem(item)
+            self.visible_flight_markers.append(item)
 
     def jump_to_index(self, index: int) -> None:
         if not self.track_xs:
@@ -834,15 +700,14 @@ class MainWindow(QMainWindow):
         else:
             self.sim_elapsed_seconds = float(clamped_index)
 
-        end = clamped_index + 1
-        self.flown_track_item.setData(self.track_xs[:end], self.track_ys[:end])
-        self.marker_item.setData([self.track_xs[clamped_index]], [self.track_ys[clamped_index]])
+        self._render_recent_track_view()
+        self._render_active_gaggles()
         self._set_timeline_slider_value(clamped_index)
         total_seconds = self.track_time_offsets[-1] if self.track_time_offsets else float(len(self.track_xs) - 1)
         self.timeline_label.setText(
             f"Time: {self._format_seconds(self.sim_elapsed_seconds)} / {self._format_seconds(total_seconds)}"
         )
-        self.status_label.setText(f"Status: frame {end} / {len(self.track_xs)}")
+        self.status_controller.playback_frame(clamped_index + 1, len(self.track_xs))
 
     def on_timeline_slider_changed(self, value: int) -> None:
         if self.timeline_internal_update:
@@ -884,41 +749,6 @@ class MainWindow(QMainWindow):
 
         self.jump_to_index(nearest_index)
 
-    def _build_time_offsets(self, fixes: list) -> list[float]:
-        if not fixes:
-            return []
-
-        first_timestamp = getattr(fixes[0], "timestamp", None)
-        if first_timestamp is None:
-            return [float(i) for i in range(len(fixes))]
-
-        offsets: list[float] = []
-        previous = 0.0
-        for idx, fix in enumerate(fixes):
-            timestamp = getattr(fix, "timestamp", None)
-            if timestamp is None:
-                offsets.append(float(idx))
-                previous = offsets[-1]
-                continue
-
-            if isinstance(timestamp, (int, float)) and isinstance(first_timestamp, (int, float)):
-                delta = float(timestamp - first_timestamp)
-            else:
-                delta_obj = timestamp - first_timestamp
-                if hasattr(delta_obj, "total_seconds"):
-                    delta = float(delta_obj.total_seconds())
-                else:
-                    delta = float(delta_obj)
-
-            if delta < previous:
-                delta = previous
-            offsets.append(float(delta))
-            previous = float(delta)
-
-        if offsets[-1] <= 0.0:
-            return [float(i) for i in range(len(fixes))]
-        return offsets
-
     def _set_timeline_slider_value(self, value: int) -> None:
         self.timeline_internal_update = True
         self.timeline_slider.setValue(value)
@@ -950,6 +780,12 @@ class MainWindow(QMainWindow):
             xs.append(float(x_m) / 1000.0)
             ys.append(float(y_m) / 1000.0)
         return xs, ys
+
+    def closeEvent(self, event) -> None:
+        self.flight_render_controller.shutdown()
+        self.flight_load_controller.shutdown()
+        self.download_controller.shutdown()
+        super().closeEvent(event)
 
 
 def main() -> int:

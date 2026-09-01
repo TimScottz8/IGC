@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import json
+import sys
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 
 import libigc
@@ -12,6 +15,19 @@ from geo_task import (
     extract_task_points_from_igc,
     extract_task_sectors_from_igc,
 )
+
+
+@dataclass
+class FlightFix:
+    lat: float
+    lon: float
+    timestamp: Any = None
+
+
+@dataclass
+class FlightDataProxy:
+    fixes: list[FlightFix] = field(default_factory=list)
+    valid: bool = True
 
 
 @dataclass
@@ -73,3 +89,91 @@ class FlightRecord:
 
 def load_flight_record(file_path: str) -> FlightRecord:
     return FlightRecord.from_path(file_path)
+
+
+def _serialize_timestamp(timestamp: Any) -> Any:
+    if timestamp is None or isinstance(timestamp, (str, int, float, bool)):
+        return timestamp
+    if hasattr(timestamp, "isoformat"):
+        return {"kind": "datetime", "value": timestamp.isoformat()}
+    return str(timestamp)
+
+
+def _deserialize_timestamp(timestamp: Any) -> Any:
+    if isinstance(timestamp, dict) and timestamp.get("kind") == "datetime":
+        return datetime.fromisoformat(str(timestamp.get("value") or ""))
+    return timestamp
+
+
+def serialize_flight_record(file_path: str) -> dict[str, Any]:
+    record = load_flight_record(file_path)
+    return {
+        "file_path": record.file_path,
+        "valid": record.valid,
+        "fixes": [
+            {
+                "lat": float(fix.lat),
+                "lon": float(fix.lon),
+                "timestamp": _serialize_timestamp(getattr(fix, "timestamp", None)),
+            }
+            for fix in record.fixes
+        ],
+        "task_points": record.task_points,
+        "task_sectors": record.task_sectors,
+        "start_sector": record.start_sector,
+        "finish_sector": record.finish_sector,
+        "start_time": record.start_time,
+    }
+
+
+def flight_record_from_payload(payload: dict[str, Any]) -> FlightRecord:
+    fixes = [
+        FlightFix(
+            lat=float(item["lat"]),
+            lon=float(item["lon"]),
+            timestamp=_deserialize_timestamp(item.get("timestamp")),
+        )
+        for item in payload.get("fixes", [])
+    ]
+    valid = bool(payload.get("valid"))
+    flight = FlightDataProxy(fixes=fixes, valid=valid) if valid else None
+    return FlightRecord(
+        file_path=str(payload.get("file_path") or ""),
+        flight=flight,
+        fixes=fixes,
+        task_points=list(payload.get("task_points") or []),
+        task_sectors=list(payload.get("task_sectors") or []),
+        start_sector=payload.get("start_sector"),
+        finish_sector=payload.get("finish_sector"),
+        start_time=payload.get("start_time"),
+        valid=valid,
+    )
+
+
+def serve() -> int:
+    for line in sys.stdin:
+        request_text = line.strip()
+        if not request_text:
+            continue
+        try:
+            request = json.loads(request_text)
+            paths = [str(path) for path in request.get("paths", []) if path]
+            response = {"ok": True, "records": [serialize_flight_record(path) for path in paths]}
+        except Exception as exc:
+            response = {"ok": False, "error": str(exc)}
+        sys.stdout.write(json.dumps(response) + "\n")
+        sys.stdout.flush()
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = list(sys.argv[1:] if argv is None else argv)
+    if args and args[0] == "--serve":
+        return serve()
+    payloads = [serialize_flight_record(path) for path in args if path]
+    json.dump(payloads, sys.stdout)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

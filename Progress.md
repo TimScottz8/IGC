@@ -1,88 +1,75 @@
 # Progress Summary
 
-## Project purpose
-This project is not just a flight viewer. It is a desktop application for analysing historical glider contest traces to understand whether online OGN/FLARM guidance changed gaggle formation and whether that correlates with pilot start time and flight safety.
+Canonical overview:
+- `README.md` describes the current project scope
+- `Pathway.md` describes the long-term analysis direction
 
-The intended product is a Qt-based analysis tool that helps answer questions such as:
-- Did larger gaggles form more often after OGN data became available?
-- Are later starters more likely to join a gaggle already formed by earlier pilots?
-- Is there a measurable relationship between start time, grouping, and safety risk?
-- Are there contest-day or class-specific patterns in this behaviour?
-
-## Core product direction
-The app should support:
-- loading one or more IGC files from a contest or contest dataset
-- selecting flights by contest, class, day, or pilot subset
-- viewing flights in 2D and 3D
-- analysing start times, route geometry, and gaggle behaviour over time
-- comparing results across eras, classes, or start-time bands
-
-The long-term goal is a same-window analysis workflow in which the map, timeline, and derived metrics all work together around the underlying flight data rather than around a single display-only file viewer.
-
-## What we have done this evening
-We continued the safe refactor from the earlier Streamlit-to-Qt migration while keeping the app stable and behaviour-preserving.
+## What we have achieved in the current checkpoint
+The app is now at the point where the direct selection flow is genuinely multi-flight capable and the playback state remains stable while gliders are added or removed from the active scene.
 
 ### Completed work
-- moved contest discovery and download planning into Qt-friendly helper logic
-- grouped discovered contest links by class and day in the contest tree
-- improved local downloaded contest browsing with class/day grouping
-- made multi-select opening and multi-flight viewing behave consistently
-- added progress updates while flights are loading
-- kept loading flow and viewer switching in sync without breaking selection state
-- extracted repeated selection and tree-building logic into reusable helpers
-- fixed regressions caused by Qt enum access and selection re-entry during refactor
-- removed stale legacy code that was no longer active in the Qt workflow
+- kept the Qt refactor stable while improving selection behaviour
+- improved multi-flight loading and viewer state handling
+- made dynamic selection in the start-time tree work as a true multi-select interaction
+- ensured each selected glider has a distinct visible marker in the flight scene
+- rendered recent multi-flight trails rather than a single whole-flight breadcrumb path
+- preserved the current playback timestamp when you select or deselect flights mid-animation
+- implemented a first-pass thermal-only gaggle detection layer
+- added targeted regression coverage for the recent-track rendering and selection flow
 
 ### Current active architecture
-- `qt_app.py` — desktop application shell and UI wiring
-- `qt_helpers.py` — shared contest, selection, grouping, path-normalization, and download logic
+- `qt_app.py` — desktop application shell, playback controls, and selection-driven rendering state
+- `qt_viewer.py` — render pipeline, multi-flight trail logic, and current-time preservation logic
+- `qt_helpers.py` — contest grouping, path handling, and selection extraction helpers
 - `flight_loader.py` — cached flight parsing and record access
 - `flight_model.py` — structured flight record model
 - `scene_state.py` — active and selected flight state for the viewer
-- `timeline_state.py` — playback timeline and time index state
-- `download_helpers.py` — download and URL normalization helpers
+- `timeline_state.py` — playback timeline and time indexing state
+- `gaggle_analysis.py` — thermal cluster and gaggle detection logic
 - `geo_task.py` and `sector_geometry.py` — task geometry and sector logic
-- `test_geo_task.py` — regression suite covering the current app behaviour
+- `test_geo_task.py` and `test_gaggle_analysis.py` — current regression suite covering the app contract and gaggle logic
 
 ## Current state
-The project is currently in a stable refactor state.
+The project is now in a working multi-flight, time-stable playback state with a focus on thermal-only gaggle detection.
 
-The main functional goal we have reached is a Qt desktop workflow that can:
-- discover contest downloads
-- organise classes and days
-- select and download files
-- open flights from local or external sources
-- load multiple flights into the viewer model
-- render the active flights in the current Qt viewer flow
+The app can now:
+- discover and download contest flights
+- open multiple gliders together
+- dynamically select and deselect gliders without resetting time
+- show recent trails for the selected aircraft instead of forcing a single full-track render
+- inspect the current scene with thermal gaggle markers in a first-pass analysis mode
 
-The app is still in the early analysis-product stage rather than the final research platform. The core feature set is present, but the deeper gaggle-analysis and 3D comparison work remains future work.
+This is still an analysis-first product, not a finished production suite, but it is much closer to the intended contest-analysis workflow.
 
 ## Verified status
-We verified the current state with:
-- `QT_QPA_PLATFORM=offscreen .venv/bin/python -m pytest -q test_geo_task.py`
-- Result: 33 passed in 26.11s
+The current working verification commands were:
+- `.venv/bin/python -m pytest -q test_gaggle_analysis.py`
+- `.venv/bin/python -m py_compile qt_app.py qt_viewer.py test_geo_task.py`
+- direct Qt selection check confirming `active_flights 2`, `visible_markers 2`, and preserved playback time
+
+Latest observed output:
+- `1 passed in 0.02s`
+- live render check reported `preserved_time 10 10.0`
 
 ## Scope still deliberately deferred
-The project is intentionally not trying to do all of the future analysis work in one step. We have intentionally deferred:
-- full OZ drawing work
-- fuller 3D investigation and scene complexity
-- advanced gaggle metrics and comparison analytics
-
-This keeps the codebase stable while the main app flow is grounded and working.
+The project is intentionally not trying to solve every future analysis problem in one step. The remaining work is still deliberately scoped to:
+- clearer gaggle mapping on the 2D scene
+- stronger cluster metrics and start-time correlation
+- stronger dashboard outputs for group size and timing
+- later extension toward a fuller 3D comparison workflow
 
 ## Next session guidance
 When we resume, the best next steps are:
-1. continue to keep the refactor safe and behaviour-preserving
-2. thin out the remaining legacy or duplicated logic only where it is clearly dead
-3. keep the architecture multi-flight-ready for the future gaggle-analysis work
-4. avoid broad feature churning until the viewer and selection flow are fully settled
-5. return to the analysis direction set out in Pathway.md rather than treating the tool as a pure flight viewer
+1. keep the selection and playback model stable while the product grows
+2. improve the visual clarity of cluster markers on the map
+3. compute per-flight gaggle summaries and correlate them with start time
+4. continue toward the analysis direction in `Pathway.md` without losing the current working viewer baseline
 
 ## Restart prompt for next time
 The next session should start by checking:
-- `qt_app.py` for UI/state flow
-- `qt_helpers.py` for extracted logic and grouping helpers
-- `test_geo_task.py` for the current contract and verification baseline
-- `Pathway.md` for the true product purpose and end goal
+- `qt_app.py` for the viewer and playback shell
+- `qt_viewer.py` for the render and selection-time logic
+- `gaggle_analysis.py` for the current thermal gaggle model
+- `Pathway.md` for the product-level research goal
 
-The real goal remains: turn the current working desktop app into the analysis tool for contest trace and gaggle behaviour research, while continuing to keep the code safe and maintainable.
+The real goal remains: turn the working Qt viewer into a practical contest-analysis tool focused on gaggle formation, start-time correlation, and thermal-only group detection.
