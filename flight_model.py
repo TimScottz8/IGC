@@ -22,6 +22,9 @@ class FlightFix:
     lat: float
     lon: float
     timestamp: Any = None
+    alt: float | None = None
+    gnss_alt: float | None = None
+    press_alt: float | None = None
 
 
 @dataclass
@@ -105,6 +108,15 @@ def _deserialize_timestamp(timestamp: Any) -> Any:
     return timestamp
 
 
+def _serialize_optional_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def serialize_flight_record(file_path: str) -> dict[str, Any]:
     record = load_flight_record(file_path)
     return {
@@ -115,6 +127,9 @@ def serialize_flight_record(file_path: str) -> dict[str, Any]:
                 "lat": float(fix.lat),
                 "lon": float(fix.lon),
                 "timestamp": _serialize_timestamp(getattr(fix, "timestamp", None)),
+                "alt": _serialize_optional_float(getattr(fix, "alt", None)),
+                "gnss_alt": _serialize_optional_float(getattr(fix, "gnss_alt", None)),
+                "press_alt": _serialize_optional_float(getattr(fix, "press_alt", None)),
             }
             for fix in record.fixes
         ],
@@ -132,6 +147,9 @@ def flight_record_from_payload(payload: dict[str, Any]) -> FlightRecord:
             lat=float(item["lat"]),
             lon=float(item["lon"]),
             timestamp=_deserialize_timestamp(item.get("timestamp")),
+            alt=_serialize_optional_float(item.get("alt")),
+            gnss_alt=_serialize_optional_float(item.get("gnss_alt")),
+            press_alt=_serialize_optional_float(item.get("press_alt")),
         )
         for item in payload.get("fixes", [])
     ]

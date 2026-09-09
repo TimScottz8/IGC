@@ -446,34 +446,6 @@ class FlightRenderController(QObject):
             for item in self.window.extra_track_items:
                 self.window.plot_widget.removeItem(item)
             self.window.extra_track_items = []
-            if len(active_records) > 1:
-                colors = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b"]
-                for index, extra_record in enumerate(active_records[1:], start=1):
-                    reference_total = max(self.window.track_time_offsets[-1], 1.0) if self.window.track_time_offsets else max(len(self.window.track_xs) - 1, 1)
-                    reference_fraction = 0.0 if reference_total <= 0 else self.window.sim_elapsed_seconds / reference_total
-                    extra_timeline = TimelineState.from_flight(extra_record)
-                    extra_offsets = extra_timeline.time_offsets
-                    if extra_offsets and extra_offsets[-1] > 0:
-                        local_total = extra_offsets[-1]
-                        local_index = int(reference_fraction * max(len(extra_offsets) - 1, 0))
-                        start_index, end_index = recent_track_window_for_record(
-                            extra_record,
-                            local_index,
-                            self.window.recent_track_seconds,
-                            total_seconds=local_total,
-                        )
-                        extra_lons = extra_record.lons[start_index:end_index + 1]
-                        extra_lats = extra_record.lats[start_index:end_index + 1]
-                    else:
-                        extra_lons = extra_record.lons[-min(len(extra_record.lons), 10):]
-                        extra_lats = extra_record.lats[-min(len(extra_record.lats), 10):]
-                    extra_xs, extra_ys = self.window._project_lon_lat_lists(extra_lons, extra_lats)
-                    extra_item = self.window.plot_widget.plot(
-                        extra_xs,
-                        extra_ys,
-                        pen=pg.mkPen(color=colors[(index - 1) % len(colors)], width=1.5),
-                    )
-                    self.window.extra_track_items.append(extra_item)
 
             preserve_elapsed = self.window.track_xs and (self.window.sim_elapsed_seconds > 0 or self.window.current_index > 0)
             prior_elapsed = self.window.sim_elapsed_seconds
@@ -492,7 +464,8 @@ class FlightRenderController(QObject):
             else:
                 self.window.current_index = 0
                 self.window.sim_elapsed_seconds = 0.0
-            self.window._render_recent_track_view()
+            self.window._render_track_view(use_recent_trail=False)
+            self.window._render_gaggle_reference_zones()
             self.window._render_active_gaggles()
             self.window.plot_widget.enableAutoRange()
             self.window.play_button.setEnabled(True)

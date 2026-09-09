@@ -4,72 +4,66 @@ Canonical overview:
 - `README.md` describes the current project scope
 - `Pathway.md` describes the long-term analysis direction
 
-## What we have achieved in the current checkpoint
-The app is now at the point where the direct selection flow is genuinely multi-flight capable and the playback state remains stable while gliders are added or removed from the active scene.
+## Current checkpoint
+The viewer is now beyond the initial multi-flight baseline and has an actively evolving thermal gaggle analysis workflow.
 
-### Completed work
-- kept the Qt refactor stable while improving selection behaviour
-- improved multi-flight loading and viewer state handling
-- made dynamic selection in the start-time tree work as a true multi-select interaction
-- ensured each selected glider has a distinct visible marker in the flight scene
-- rendered recent multi-flight trails rather than a single whole-flight breadcrumb path
-- preserved the current playback timestamp when you select or deselect flights mid-animation
-- implemented a first-pass thermal-only gaggle detection layer
-- added targeted regression coverage for the recent-track rendering and selection flow
+The core product direction is unchanged: this is an analysis-first Qt desktop application for studying contest behaviour, gaggle formation, and start-time relationships. The recent work concentrated on making gaggle detection visible enough to iterate on in the viewer, while keeping the playback workflow stable.
 
-### Current active architecture
-- `qt_app.py` — desktop application shell, playback controls, and selection-driven rendering state
-- `qt_viewer.py` — render pipeline, multi-flight trail logic, and current-time preservation logic
-- `qt_helpers.py` — contest grouping, path handling, and selection extraction helpers
-- `flight_loader.py` — cached flight parsing and record access
-- `flight_model.py` — structured flight record model
-- `scene_state.py` — active and selected flight state for the viewer
-- `timeline_state.py` — playback timeline and time indexing state
-- `gaggle_analysis.py` — thermal cluster and gaggle detection logic
-- `geo_task.py` and `sector_geometry.py` — task geometry and sector logic
-- `test_geo_task.py` and `test_gaggle_analysis.py` — current regression suite covering the app contract and gaggle logic
+## Completed in this session block
+- preserved full flight-path display while static, with snail-trail rendering only during active animation
+- added inline gaggle settings in the Flight viewer for distance, time window, minimum cluster size, and vertical separation
+- added persistent gaggle reference zones for static inspection and current-time-only gaggle overlays during animation
+- moved gaggle detection off the UI thread and added visible progress/cancel controls for heavy day-level processing
+- enabled a multiprocessing clustering path to use multiple CPU cores, with serial fallback when process-pool startup is unsuitable
+- fixed a critical data issue where altitude fields were lost during parser-service serialization, which previously caused zero detected gaggle zones
+- aligned gaggle event timestamps to the same relative-seconds timeline used by playback, which is necessary for animated detection to line up with the map
+- introduced drift-aware gaggle-zone merging so one drifting thermal does not explode into many separate reference zones
+- limited overlay draw load to avoid UI hangs after detection completes
+- corrected gaggle visual size to use unique-flight count instead of raw event count
 
-## Current state
-The project is now in a working multi-flight, time-stable playback state with a focus on thermal-only gaggle detection.
-
+## Current behaviour
 The app can now:
 - discover and download contest flights
 - open multiple gliders together
 - dynamically select and deselect gliders without resetting time
-- show recent trails for the selected aircraft instead of forcing a single full-track render
-- inspect the current scene with thermal gaggle markers in a first-pass analysis mode
+- show full routes when paused or static, and snail trails while animating
+- compute thermal gaggle candidates with horizontal, temporal, and vertical separation filters
+- show whole-flight reference zones while static
+- show only current or recent gaggle overlays while animating, instead of the entire flight's zones
+- keep gaggle circles visible for a persistence window after departure so formation can be followed in playback
 
-This is still an analysis-first product, not a finished production suite, but it is much closer to the intended contest-analysis workflow.
+## Important implementation notes
+- `flight_model.py` now preserves `alt`, `gnss_alt`, and `press_alt` when records move through the parser-service path
+- `gaggle_analysis.py` is currently the main performance-sensitive module; it now contains:
+- clearer thermal threshold constants
+- relative-time event generation
+- fast horizontal prefiltering before geodesic distance checks
+- multiprocessing chunk execution with a safe fallback path
+- `qt_app.py` now owns substantial gaggle UI state, including settings, progress UI, static reference rendering, active animation overlays, and drift-zone merging
+
+## Current limitations and known issues
+- animated gaggle visualization is improved but still needs more field validation; the latest issue under active refinement has been making active circles appear consistently and with sensible persistence
+- drift merging is heuristic and likely needs exposure of its parameters in the UI once the baseline behaviour feels trustworthy
+- there is now a lot of gaggle-specific logic in `qt_app.py`; a future cleanup should move this into a dedicated controller/service layer once behaviour stabilizes
+- `pytest` is not currently available in the repo venv on this machine, so test verification has been limited to compile checks and live application validation
 
 ## Verified status
-The current working verification commands were:
-- `.venv/bin/python -m pytest -q test_gaggle_analysis.py`
-- `.venv/bin/python -m py_compile qt_app.py qt_viewer.py test_geo_task.py`
-- direct Qt selection check confirming `active_flights 2`, `visible_markers 2`, and preserved playback time
+Verified commands in the local venv:
+- `.venv/bin/python -m py_compile flight_model.py gaggle_analysis.py qt_app.py qt_viewer.py test_gaggle_analysis.py`
 
-Latest observed output:
-- `1 passed in 0.02s`
-- live render check reported `preserved_time 10 10.0`
+Observed constraints:
+- `.venv/bin/python -m pytest -q test_gaggle_analysis.py` currently fails because `pytest` is not installed in the local `.venv`
 
-## Scope still deliberately deferred
-The project is intentionally not trying to solve every future analysis problem in one step. The remaining work is still deliberately scoped to:
-- clearer gaggle mapping on the 2D scene
-- stronger cluster metrics and start-time correlation
-- stronger dashboard outputs for group size and timing
-- later extension toward a fuller 3D comparison workflow
+Additional direct checks already performed during this session:
+- real downloaded IGC files now load with altitude present in the parsed fixes
+- real-data gaggle clustering returns non-zero clusters with practical thresholds once altitude serialization is preserved
 
-## Next session guidance
-When we resume, the best next steps are:
-1. keep the selection and playback model stable while the product grows
-2. improve the visual clarity of cluster markers on the map
-3. compute per-flight gaggle summaries and correlate them with start time
-4. continue toward the analysis direction in `Pathway.md` without losing the current working viewer baseline
+## Best next steps
+1. verify animated current-gaggle circles visually on a known day dataset and tune persistence or active-window logic only after that behaviour is confirmed
+2. expose drift-merge parameters in the UI if one thermal still becomes several zones under contest-day conditions
+3. move gaggle rendering/detection orchestration out of `qt_app.py` into a dedicated controller once the interaction model stops changing every session
+4. install `pytest` in the repo-local `.venv` and restore executable regression validation for the gaggle pipeline
+5. start computing per-flight gaggle summaries once the overlay semantics are visually trustworthy
 
 ## Restart prompt for next time
-The next session should start by checking:
-- `qt_app.py` for the viewer and playback shell
-- `qt_viewer.py` for the render and selection-time logic
-- `gaggle_analysis.py` for the current thermal gaggle model
-- `Pathway.md` for the product-level research goal
-
-The real goal remains: turn the working Qt viewer into a practical contest-analysis tool focused on gaggle formation, start-time correlation, and thermal-only group detection.
+Resume from `resume.md` and continue tightening the thermal gaggle animation workflow, especially current-time overlay behaviour, drift merging, and the transition from map-only cues to per-flight metrics.
