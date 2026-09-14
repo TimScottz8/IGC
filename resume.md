@@ -5,6 +5,21 @@ Start with:
 - [README.md](README.md) for the current project scope
 - [Pathway.md](Pathway.md) for the long-term product goal
 - [Progress.md](Progress.md) for the latest working state and immediate next tasks
+- [IMPLEMENTATION_SPEC.md](IMPLEMENTATION_SPEC.md) for the agreed implementation contract for competition-scale gaggle analysis, persistence, and reporting
+
+## Strategic update
+The product direction has now been sharpened beyond viewer workflow refinement.
+
+The app's ultimate purpose is to generate policy-grade evidence for the International Gliding Commission about whether increasing practical availability of live positional awareness is associated with safety and fairness changes large enough to justify rule discussion.
+
+The current agreed implementation direction is:
+- analyse whole competitions, not isolated flights
+- compute day-level summaries first, then aggregate to competition-level summaries
+- compare competitions over time rather than relying on a binary OGN adoption date
+- persist analysis layers so common gaggle-parameter changes do not require reparsing raw flights
+- save graphs and summaries with parameter fingerprints and analysis-version provenance
+
+Before implementing major new behaviour, read [IMPLEMENTATION_SPEC.md](IMPLEMENTATION_SPEC.md) and treat it as the primary contract for the next build stage.
 
 ## Current status
 The app is now a working multi-flight desktop viewer with a much more advanced thermal gaggle workflow than the previous checkpoint, but the gaggle overlay behaviour is still under active tuning.
