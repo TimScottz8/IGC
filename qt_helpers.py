@@ -272,6 +272,22 @@ def selected_local_flight_paths(selected_items: list) -> list[str]:
     targets: list[str] = []
     seen: set[str] = set()
 
+    def is_descendant(node, ancestor) -> bool:
+        parent = node.parent()
+        while parent is not None:
+            if parent is ancestor:
+                return True
+            parent = parent.parent()
+        return False
+
+    # Keep the most specific selected nodes. If both an ancestor and descendant
+    # are selected, only the descendant should contribute paths.
+    effective_items: list = []
+    for item in selected_items:
+        if any(other is not item and is_descendant(other, item) for other in selected_items):
+            continue
+        effective_items.append(item)
+
     def add_item_paths(item) -> None:
         file_path = item.data(0, Qt.ItemDataRole.UserRole + 4) or ""
         if file_path:
@@ -282,7 +298,7 @@ def selected_local_flight_paths(selected_items: list) -> list[str]:
         for child_index in range(item.childCount()):
             add_item_paths(item.child(child_index))
 
-    for item in selected_items:
+    for item in effective_items:
         add_item_paths(item)
     return targets
 
@@ -303,6 +319,25 @@ def unique_file_paths(file_paths: list[str]) -> list[str]:
 def normalize_file_selection(file_paths: list[str]) -> list[str]:
     """Return a unique list of file paths using the same normalization rules throughout the UI."""
     return unique_file_paths(file_paths)
+
+
+def infer_contest_class_day_from_path(file_path: str) -> dict[str, str]:
+    """Infer contest/class/day labels from a downloaded IGC path when possible."""
+    normalized = os.path.abspath(str(file_path or ""))
+    if not normalized:
+        return {"contest_name": "", "class_name": "Flights", "day": "Unsorted"}
+
+    parts = normalized.split(os.sep)
+    if "igc_downloads" in parts:
+        root_index = parts.index("igc_downloads")
+        if root_index + 3 < len(parts):
+            return {
+                "contest_name": parts[root_index + 1],
+                "class_name": parts[root_index + 2],
+                "day": parts[root_index + 3],
+            }
+
+    return {"contest_name": "", "class_name": "Flights", "day": "Unsorted"}
 
 
 def selected_files_label(file_paths: list[str]) -> str:
@@ -402,6 +437,22 @@ def selected_start_time_paths(selected_items: list) -> list[str]:
     targets: list[str] = []
     seen: set[str] = set()
 
+    def is_descendant(node, ancestor) -> bool:
+        parent = node.parent()
+        while parent is not None:
+            if parent is ancestor:
+                return True
+            parent = parent.parent()
+        return False
+
+    # Keep only most specific selected nodes so selecting a day does not also
+    # include an entire class/competition if those ancestor nodes are selected.
+    effective_items: list = []
+    for item in selected_items:
+        if any(other is not item and is_descendant(other, item) for other in selected_items):
+            continue
+        effective_items.append(item)
+
     def add_item_paths(item) -> None:
         file_path = item.data(0, Qt.ItemDataRole.UserRole) or ""
         if file_path:
@@ -412,7 +463,7 @@ def selected_start_time_paths(selected_items: list) -> list[str]:
         for child_index in range(item.childCount()):
             add_item_paths(item.child(child_index))
 
-    for item in selected_items:
+    for item in effective_items:
         add_item_paths(item)
     return targets
 

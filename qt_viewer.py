@@ -9,7 +9,7 @@ import pyqtgraph as pg
 from PySide6.QtCore import QObject, QThread, QTimer, Signal
 
 from flight_model import FlightRecord, flight_record_from_payload
-from qt_helpers import normalize_file_selection, selected_start_time_paths
+from qt_helpers import infer_contest_class_day_from_path, normalize_file_selection, selected_start_time_paths
 from timeline_state import TimelineState
 
 
@@ -65,13 +65,19 @@ class PersistentFlightParserService:
                 process.wait(timeout=2)
 
     def load_record_payload(self, file_path: str) -> dict:
-        response = self._request({"paths": [file_path]})
+        payloads = self.load_record_payloads([file_path])
+        if not payloads:
+            raise RuntimeError(f"parser service returned no data for {file_path}")
+        return payloads[0]
+
+    def load_record_payloads(self, file_paths: list[str]) -> list[dict]:
+        if not file_paths:
+            return []
+        response = self._request({"paths": list(file_paths)})
         if not response.get("ok"):
             raise RuntimeError(str(response.get("error") or "parser service failed"))
         records = response.get("records") or []
-        if not records:
-            raise RuntimeError(f"parser service returned no data for {file_path}")
-        return dict(records[0])
+        return [dict(item) for item in records]
 
     def _request(self, payload: dict, *, retry: bool = True) -> dict:
         process = self._ensure_process()
@@ -137,13 +143,25 @@ class FlightLoadWorker(QObject):
         try:
             records: list[FlightRecord] = []
             total = len(self.file_paths)
-            for index, file_path in enumerate(self.file_paths, start=1):
+            processed = 0
+            chunk_size = max(24, min(128, total))
+            for start in range(0, total, chunk_size):
                 if self._cancel_requested:
-                    self.finished.emit(records, True, len(records), total)
+                    self.finished.emit(records, True, processed, total)
                     return
-                payload = self.parser_service.load_record_payload(file_path)
-                records.append(flight_record_from_payload(payload))
-                self.progress.emit(index, total, file_path)
+                chunk_paths = self.file_paths[start:start + chunk_size]
+                payloads = self.parser_service.load_record_payloads(chunk_paths)
+                if len(payloads) != len(chunk_paths):
+                    raise RuntimeError(
+                        f"parser service returned {len(payloads)} records for {len(chunk_paths)} requested files"
+                    )
+                for file_path, payload in zip(chunk_paths, payloads):
+                    if self._cancel_requested:
+                        self.finished.emit(records, True, processed, total)
+                        return
+                    records.append(flight_record_from_payload(payload))
+                    processed += 1
+                    self.progress.emit(processed, total, file_path)
             self.finished.emit(records, False, len(records), total)
         except Exception as exc:
             self.failed.emit(f"Failed to load flight records: {exc}")
@@ -190,8 +208,13 @@ class FlightLoadController(QObject):
         if not unique_paths:
             return []
 
-        cached_records = self._all_cached_records(unique_paths)
-        if cached_records is not None:
+        cached_records = self._ordered_cached_valid_records(unique_paths)
+        missing_paths = [
+            file_path
+            for file_path in unique_paths
+            if self.cached_record(file_path) is None
+        ]
+        if not missing_paths:
             self.window.status_controller.ready_to_view(len(cached_records))
             return cached_records
 
@@ -200,11 +223,11 @@ class FlightLoadController(QObject):
             return None
 
         self._cancel_requested = False
-        self.window.status_controller.start_flight_progress(len(unique_paths), unique_paths[0])
+        self.window.status_controller.start_flight_progress(len(missing_paths), missing_paths[0])
         self.window.set_flight_loading_busy(True, allow_cancel=True)
 
         thread = QThread(self.window)
-        worker = FlightLoadWorker(self.parser_service, unique_paths)
+        worker = FlightLoadWorker(self.parser_service, missing_paths)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         worker.progress.connect(self._on_load_progress)
@@ -217,16 +240,19 @@ class FlightLoadController(QObject):
 
         self._load_thread = thread
         self._load_worker = worker
-        self._load_completion = {"on_loaded": on_loaded}
+        self._load_completion = {
+            "on_loaded": on_loaded,
+            "requested_paths": unique_paths,
+        }
         thread.start()
         return None
 
-    def _all_cached_records(self, file_paths: list[str]) -> list[FlightRecord] | None:
+    def _ordered_cached_valid_records(self, file_paths: list[str]) -> list[FlightRecord]:
         records: list[FlightRecord] = []
         for file_path in file_paths:
             record = self.cached_record(file_path)
             if record is None:
-                return None
+                continue
             records.append(record)
         return [record for record in records if record.valid and record.flight is not None]
 
@@ -248,7 +274,7 @@ class FlightLoadController(QObject):
         if self._shutting_down:
             return
         completion = self._load_completion or {}
-        valid_records = self._cache_loaded_records(records)
+        self._cache_loaded_records(records)
         self.window.status_controller.finish_flight_progress()
         self.window.set_flight_loading_busy(False)
         on_loaded = completion.get("on_loaded")
@@ -256,6 +282,8 @@ class FlightLoadController(QObject):
             self.window.status_controller.flight_cancelled(completed, total)
             self._cancel_requested = False
             return
+        requested_paths = list(completion.get("requested_paths") or [])
+        valid_records = self._ordered_cached_valid_records(requested_paths)
         self.window.status_controller.ready_to_view(len(valid_records))
         if callable(on_loaded):
             on_loaded(valid_records)
@@ -378,10 +406,10 @@ class FlightRenderController(QObject):
             self.window.scene_state.set_selected_index(0)
             if not self._rendering_selected_start_times:
                 self.window.refresh_start_time_list([
-                    {
+                    ({
                         "file_path": record.file_path,
                         "start_time": record.start_time or (record.fixes[0].timestamp if record.fixes else None),
-                    }
+                    } | infer_contest_class_day_from_path(record.file_path))
                     for record in records
                 ])
             self._render_loaded_record(records[0], active_records=records)
@@ -424,7 +452,7 @@ class FlightRenderController(QObject):
                 active_records = [record]
                 if not self._rendering_selected_start_times:
                     self.window.refresh_start_time_list([
-                        {"file_path": record.file_path, "start_time": start_time}
+                        ({"file_path": record.file_path, "start_time": start_time} | infer_contest_class_day_from_path(record.file_path))
                     ])
             self.window.scene_state.set_active_flights(active_records)
             self.window.scene_state.set_selected_flight(record)

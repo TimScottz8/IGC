@@ -29,6 +29,14 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from analysis_setup import (
+    AnalysisParameters,
+    changed_fields,
+    highest_change_impact,
+    parameter_fingerprint,
+    parameter_impact,
+    validate_flights,
+)
 from flight_loader import FlightCache
 from gaggle_analysis import compute_thermal_gaggles
 from qt_controllers import DownloadController
@@ -45,7 +53,6 @@ from qt_helpers import (
     normalize_file_selection,
     selected_files_label,
 )
-from sector_geometry import _distance_between_points_m
 from timeline_state import TimelineState
 
 
@@ -67,6 +74,9 @@ class GaggleDetectionWorker(QObject):
         max_distance_m: float,
         max_time_delta_s: float,
         max_altitude_delta_m: float,
+        break_distance_m: float,
+        break_duration_s: float,
+        circling_grace_s: float,
         min_cluster_size: int,
     ) -> None:
         super().__init__()
@@ -75,6 +85,9 @@ class GaggleDetectionWorker(QObject):
         self.max_distance_m = float(max_distance_m)
         self.max_time_delta_s = float(max_time_delta_s)
         self.max_altitude_delta_m = float(max_altitude_delta_m)
+        self.break_distance_m = float(break_distance_m)
+        self.break_duration_s = float(break_duration_s)
+        self.circling_grace_s = float(circling_grace_s)
         self.min_cluster_size = int(min_cluster_size)
         self._cancel_requested = False
 
@@ -88,6 +101,9 @@ class GaggleDetectionWorker(QObject):
                 max_distance_m=self.max_distance_m,
                 max_time_delta_s=self.max_time_delta_s,
                 max_altitude_delta_m=self.max_altitude_delta_m,
+                break_distance_m=self.break_distance_m,
+                break_duration_s=self.break_duration_s,
+                circling_grace_s=self.circling_grace_s,
                 progress_callback=self._emit_progress,
                 cancel_check=lambda: self._cancel_requested,
                 use_multiprocessing=True,
@@ -118,10 +134,9 @@ class MainWindow(QMainWindow):
     GAGGLE_MAX_ACTIVE_CLUSTERS = 80
     GAGGLE_MAX_ACTIVE_MEMBER_POINTS = 2000
     GAGGLE_ACTIVE_PERSISTENCE_S = 300.0
-    GAGGLE_ZONE_LINK_BASE_DISTANCE_M = 300.0
-    GAGGLE_ZONE_DRIFT_SPEED_MPS = 8.0
-    GAGGLE_ZONE_MAX_GAP_S = 240.0
-    GAGGLE_ZONE_MIN_MEMBER_OVERLAP = 1
+    GAGGLE_EVENT_BREAK_DISTANCE_M = 900.0
+    GAGGLE_EVENT_BREAK_DURATION_S = 120.0
+    GAGGLE_EVENT_CIRCLING_GRACE_S = 60.0
     STATIC_FULL_ROUTE_PEN = (187, 187, 187, 140)
     STATIC_FLOWN_ROUTE_PEN = (17, 17, 17, 230)
     ANIMATING_TRAIL_PEN = (31, 119, 180, 230)
@@ -141,12 +156,26 @@ class MainWindow(QMainWindow):
         self._gaggle_pending_refresh = False
         self._gaggle_clusters_ready = False
         self._gaggle_reference_drawn_count = 0
+        self.analysis_version = "v1"
+        self._analysis_control_sync = False
+        self.analysis_default_parameters = AnalysisParameters(
+            max_distance_m=int(self.GAGGLE_MAX_DISTANCE_M),
+            max_time_delta_s=int(self.GAGGLE_MAX_TIME_DELTA_S),
+            max_altitude_delta_m=int(self.GAGGLE_MAX_ALTITUDE_DELTA_M),
+            min_cluster_size=int(self.GAGGLE_MIN_CLUSTER_SIZE),
+            persistence_s=int(self.GAGGLE_ACTIVE_PERSISTENCE_S),
+            break_distance_m=int(self.GAGGLE_EVENT_BREAK_DISTANCE_M),
+            break_duration_s=int(self.GAGGLE_EVENT_BREAK_DURATION_S),
+            circling_grace_s=int(self.GAGGLE_EVENT_CIRCLING_GRACE_S),
+        )
 
         self.tabs = QTabWidget(self)
 
         self.download_tab = QWidget(self)
+        self.analysis_tab = QWidget(self)
         self.viewer_tab = QWidget(self)
         self.tabs.addTab(self.download_tab, "Download")
+        self.tabs.addTab(self.analysis_tab, "Analysis setup")
         self.tabs.addTab(self.viewer_tab, "Flight viewer")
         self.setCentralWidget(self.tabs)
 
@@ -199,11 +228,15 @@ class MainWindow(QMainWindow):
         self.local_contests.setRootIsDecorated(True)
         self.local_contests.setIndentation(16)
         self.local_contests.setMaximumHeight(220)
+        self.local_contests.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.local_contests.setToolTip(
+            "Select one or more contests/classes/days/flights (Ctrl/Shift) and open them together for analysis."
+        )
         self.local_contests.itemSelectionChanged.connect(self._update_local_selection_label)
         download_layout.addWidget(self.local_contests)
 
         local_buttons = QHBoxLayout()
-        self.open_local_contest_button = QPushButton("Open selected local flights")
+        self.open_local_contest_button = QPushButton("Open selected local flights/competitions")
         self.open_local_contest_button.clicked.connect(self.open_selected_local_flights)
         local_buttons.addWidget(self.open_local_contest_button)
         download_layout.addLayout(local_buttons)
@@ -214,6 +247,22 @@ class MainWindow(QMainWindow):
 
         self.start_times_label = QLabel("Start times")
         viewer_layout.addWidget(self.start_times_label)
+        start_filter_layout = QHBoxLayout()
+        start_filter_layout.addWidget(QLabel("Day"))
+        self.start_times_day_filter = QComboBox()
+        self.start_times_day_filter.addItem("All days")
+        self.start_times_day_filter.currentTextChanged.connect(self._on_start_time_filter_changed)
+        start_filter_layout.addWidget(self.start_times_day_filter)
+        start_filter_layout.addWidget(QLabel("Class"))
+        self.start_times_class_filter = QComboBox()
+        self.start_times_class_filter.addItem("All classes")
+        self.start_times_class_filter.currentTextChanged.connect(self._on_start_time_filter_changed)
+        start_filter_layout.addWidget(self.start_times_class_filter)
+        self.start_times_clear_filter_button = QPushButton("Reset filters")
+        self.start_times_clear_filter_button.clicked.connect(self._reset_start_time_filters)
+        start_filter_layout.addWidget(self.start_times_clear_filter_button)
+        start_filter_layout.addStretch(1)
+        viewer_layout.addLayout(start_filter_layout)
         self.start_times_tree = QTreeWidget()
         self.start_times_tree.setHeaderHidden(True)
         self.start_times_tree.setColumnCount(1)
@@ -287,35 +336,43 @@ class MainWindow(QMainWindow):
         form_layout = QFormLayout()
         form_layout.setContentsMargins(0, 0, 0, 0)
 
-        self.gaggle_distance_spin = QSpinBox()
-        self.gaggle_distance_spin.setRange(100, 2000)
-        self.gaggle_distance_spin.setSingleStep(50)
-        self.gaggle_distance_spin.setValue(int(self.GAGGLE_MAX_DISTANCE_M))
-        self.gaggle_distance_spin.setSuffix(" m")
-        self.gaggle_distance_spin.valueChanged.connect(self._on_gaggle_settings_changed)
+        self.gaggle_distance_spin = self._make_spin_box(
+            minimum=100,
+            maximum=2000,
+            step=50,
+            value=int(self.GAGGLE_MAX_DISTANCE_M),
+            suffix=" m",
+            on_change=self._on_gaggle_settings_changed,
+        )
         form_layout.addRow("Distance", self.gaggle_distance_spin)
 
-        self.gaggle_time_spin = QSpinBox()
-        self.gaggle_time_spin.setRange(5, 180)
-        self.gaggle_time_spin.setSingleStep(5)
-        self.gaggle_time_spin.setValue(int(self.GAGGLE_MAX_TIME_DELTA_S))
-        self.gaggle_time_spin.setSuffix(" s")
-        self.gaggle_time_spin.valueChanged.connect(self._on_gaggle_settings_changed)
+        self.gaggle_time_spin = self._make_spin_box(
+            minimum=5,
+            maximum=180,
+            step=5,
+            value=int(self.GAGGLE_MAX_TIME_DELTA_S),
+            suffix=" s",
+            on_change=self._on_gaggle_settings_changed,
+        )
         form_layout.addRow("Time window", self.gaggle_time_spin)
 
-        self.gaggle_min_size_spin = QSpinBox()
-        self.gaggle_min_size_spin.setRange(2, 12)
-        self.gaggle_min_size_spin.setSingleStep(1)
-        self.gaggle_min_size_spin.setValue(self.GAGGLE_MIN_CLUSTER_SIZE)
-        self.gaggle_min_size_spin.valueChanged.connect(self._on_gaggle_settings_changed)
+        self.gaggle_min_size_spin = self._make_spin_box(
+            minimum=2,
+            maximum=12,
+            step=1,
+            value=self.GAGGLE_MIN_CLUSTER_SIZE,
+            on_change=self._on_gaggle_settings_changed,
+        )
         form_layout.addRow("Min size", self.gaggle_min_size_spin)
 
-        self.gaggle_altitude_spin = QSpinBox()
-        self.gaggle_altitude_spin.setRange(100, 3000)
-        self.gaggle_altitude_spin.setSingleStep(50)
-        self.gaggle_altitude_spin.setValue(int(self.GAGGLE_MAX_ALTITUDE_DELTA_M))
-        self.gaggle_altitude_spin.setSuffix(" m")
-        self.gaggle_altitude_spin.valueChanged.connect(self._on_gaggle_settings_changed)
+        self.gaggle_altitude_spin = self._make_spin_box(
+            minimum=100,
+            maximum=3000,
+            step=50,
+            value=int(self.GAGGLE_MAX_ALTITUDE_DELTA_M),
+            suffix=" m",
+            on_change=self._on_gaggle_settings_changed,
+        )
         form_layout.addRow("Vertical sep", self.gaggle_altitude_spin)
 
         gaggle_settings_layout.addLayout(form_layout)
@@ -381,6 +438,7 @@ class MainWindow(QMainWindow):
         self.contest_root_name = "Contest"
         self.track_lons: list[float] = []
         self.track_lats: list[float] = []
+        self._start_time_flights_all: list[dict[str, str]] = []
         self.track_xs: list[float] = []
         self.track_ys: list[float] = []
         self.track_time_offsets: list[float] = []
@@ -397,6 +455,8 @@ class MainWindow(QMainWindow):
         self.timer.timeout.connect(self.on_tick)
         self.plot_widget.scene().sigMouseClicked.connect(self.on_plot_mouse_clicked)
 
+        self._build_analysis_setup_tab()
+
         self.status_controller = StatusController(
             self.status_label,
             self.flight_loading_progress,
@@ -408,6 +468,7 @@ class MainWindow(QMainWindow):
         self.viewer_controller = self.flight_render_controller
         self.status_controller.waiting_for_file()
         self.refresh_local_contest_tree()
+        self.tabs.currentChanged.connect(self._on_tab_changed)
 
         file_menu = self.menuBar().addMenu("File")
         open_action = QAction("Open IGC...", self)
@@ -422,16 +483,61 @@ class MainWindow(QMainWindow):
 
     def refresh_start_time_list(self, flights: list[dict[str, str]]) -> None:
         """Refresh the start-time tree with the latest flight metadata grouped by day and class."""
+        self._start_time_flights_all = list(flights)
+        self._refresh_start_time_filters()
+        self._apply_start_time_filters_to_tree()
+
+    def _refresh_start_time_filters(self) -> None:
+        selected_day = str(self.start_times_day_filter.currentText() or "All days")
+        selected_class = str(self.start_times_class_filter.currentText() or "All classes")
+
+        day_values = sorted({str(item.get("day") or "Unsorted") for item in self._start_time_flights_all})
+        class_values = sorted({str(item.get("class_name") or "Flights") for item in self._start_time_flights_all})
+
+        self.start_times_day_filter.blockSignals(True)
+        self.start_times_class_filter.blockSignals(True)
+        try:
+            self.start_times_day_filter.clear()
+            self.start_times_day_filter.addItem("All days")
+            for day in day_values:
+                self.start_times_day_filter.addItem(day)
+
+            self.start_times_class_filter.clear()
+            self.start_times_class_filter.addItem("All classes")
+            for class_name in class_values:
+                self.start_times_class_filter.addItem(class_name)
+
+            day_index = self.start_times_day_filter.findText(selected_day)
+            class_index = self.start_times_class_filter.findText(selected_class)
+            self.start_times_day_filter.setCurrentIndex(day_index if day_index >= 0 else 0)
+            self.start_times_class_filter.setCurrentIndex(class_index if class_index >= 0 else 0)
+        finally:
+            self.start_times_day_filter.blockSignals(False)
+            self.start_times_class_filter.blockSignals(False)
+
+    def _apply_start_time_filters_to_tree(self) -> None:
         self.start_times_tree.clear()
-        entries = self.build_start_time_entries(flights)
+        selected_day = str(self.start_times_day_filter.currentText() or "All days")
+        selected_class = str(self.start_times_class_filter.currentText() or "All classes")
+
+        filtered: list[dict[str, str]] = []
+        for item in self._start_time_flights_all:
+            item_day = str(item.get("day") or "Unsorted")
+            item_class = str(item.get("class_name") or "Flights")
+            if selected_day != "All days" and item_day != selected_day:
+                continue
+            if selected_class != "All classes" and item_class != selected_class:
+                continue
+            filtered.append(item)
+
+        entries = self.build_start_time_entries(filtered)
         if not entries:
-            self.start_times_tree.addTopLevelItem(QTreeWidgetItem(["No start time available"]))
+            self.start_times_tree.addTopLevelItem(QTreeWidgetItem(["No start time available for current filters"]))
             return
 
-        grouped = group_start_time_entries(flights)
-
+        grouped = group_start_time_entries(filtered)
         if not grouped:
-            self.start_times_tree.addTopLevelItem(QTreeWidgetItem(["No start time available"]))
+            self.start_times_tree.addTopLevelItem(QTreeWidgetItem(["No start time available for current filters"]))
             return
 
         sorted_days = sorted(grouped, key=lambda name: str(name))
@@ -447,6 +553,14 @@ class MainWindow(QMainWindow):
             self.start_times_tree.addTopLevelItem(day_item)
 
         self.start_times_tree.expandToDepth(0)
+
+    def _on_start_time_filter_changed(self) -> None:
+        self._apply_start_time_filters_to_tree()
+
+    def _reset_start_time_filters(self) -> None:
+        self.start_times_day_filter.setCurrentIndex(0)
+        self.start_times_class_filter.setCurrentIndex(0)
+        self._apply_start_time_filters_to_tree()
 
     def _cache_or_load_flight_record(self, file_path: str):
         """Delegate parsing and caching to the flight loader service."""
@@ -595,9 +709,256 @@ class MainWindow(QMainWindow):
             "Legend: center marker encodes strength (low/medium/high), blue circles are members | "
             f"distance <= {int(self.gaggle_distance_m)} m, time <= {int(self.gaggle_time_delta_s)} s, "
             f"vertical <= {int(self.gaggle_altitude_delta_m)} m, min size >= {int(self.gaggle_min_cluster_size)} | "
-            f"events: {raw_count}, zones: {zone_count}, active persist: {int(self.GAGGLE_ACTIVE_PERSISTENCE_S)} s "
+            f"events: {raw_count}, zones: {zone_count}, active persist: {int(self.GAGGLE_ACTIVE_PERSISTENCE_S)} s, "
+            f"break: {int(self.GAGGLE_EVENT_BREAK_DISTANCE_M)} m/{int(self.GAGGLE_EVENT_BREAK_DURATION_S)} s, "
+            f"grace: {int(self.GAGGLE_EVENT_CIRCLING_GRACE_S)} s "
             f"(drawn {self._gaggle_reference_drawn_count}){detecting_text}"
         )
+
+    def _make_spin_box(
+        self,
+        *,
+        minimum: int,
+        maximum: int,
+        step: int,
+        value: int,
+        on_change,
+        suffix: str = "",
+    ) -> QSpinBox:
+        spin = QSpinBox()
+        spin.setRange(int(minimum), int(maximum))
+        spin.setSingleStep(int(step))
+        spin.setValue(int(value))
+        if suffix:
+            spin.setSuffix(suffix)
+        spin.valueChanged.connect(on_change)
+        return spin
+
+    def _add_analysis_spin_setting(
+        self,
+        form: QFormLayout,
+        *,
+        attr_name: str,
+        label: str,
+        field_name: str,
+        minimum: int,
+        maximum: int,
+        step: int,
+        value: int,
+        on_change,
+        suffix: str = "",
+    ) -> None:
+        spin = self._make_spin_box(
+            minimum=minimum,
+            maximum=maximum,
+            step=step,
+            value=value,
+            on_change=on_change,
+            suffix=suffix,
+        )
+        setattr(self, attr_name, spin)
+        form.addRow(self._impact_text(label, field_name), spin)
+
+    def _add_analysis_combo_setting(
+        self,
+        form: QFormLayout,
+        *,
+        attr_name: str,
+        label: str,
+        field_name: str,
+        items: list[str],
+        current_text: str,
+        on_change,
+    ) -> None:
+        combo = QComboBox()
+        combo.addItems(items)
+        combo.setCurrentText(current_text)
+        combo.currentTextChanged.connect(on_change)
+        setattr(self, attr_name, combo)
+        form.addRow(self._impact_text(label, field_name), combo)
+
+    def _build_analysis_setup_tab(self) -> None:
+        layout = QVBoxLayout(self.analysis_tab)
+
+        layout.addWidget(QLabel("Analysis setup for policy-grade competition statistics"))
+        self.analysis_scope_label = QLabel("Scope: no active flights selected")
+        layout.addWidget(self.analysis_scope_label)
+
+        core_form = QFormLayout()
+        spin_specs = [
+            ("analysis_distance_spin", "Distance", "max_distance_m", 100, 2000, 50, int(self.GAGGLE_MAX_DISTANCE_M), self._on_analysis_core_gaggle_changed, " m"),
+            ("analysis_time_spin", "Time window", "max_time_delta_s", 5, 180, 5, int(self.GAGGLE_MAX_TIME_DELTA_S), self._on_analysis_core_gaggle_changed, " s"),
+            ("analysis_altitude_spin", "Vertical sep", "max_altitude_delta_m", 100, 3000, 50, int(self.GAGGLE_MAX_ALTITUDE_DELTA_M), self._on_analysis_core_gaggle_changed, " m"),
+            ("analysis_min_size_spin", "Minimum cluster", "min_cluster_size", 2, 12, 1, int(self.GAGGLE_MIN_CLUSTER_SIZE), self._on_analysis_core_gaggle_changed, ""),
+            ("analysis_persistence_spin", "Active persistence", "persistence_s", 30, 900, 30, int(self.GAGGLE_ACTIVE_PERSISTENCE_S), self._on_analysis_settings_changed, " s"),
+            ("analysis_break_distance_spin", "Break distance", "break_distance_m", 200, 2500, 50, int(self.GAGGLE_EVENT_BREAK_DISTANCE_M), self._on_analysis_settings_changed, " m"),
+            ("analysis_break_duration_spin", "Break duration", "break_duration_s", 30, 600, 15, int(self.GAGGLE_EVENT_BREAK_DURATION_S), self._on_analysis_settings_changed, " s"),
+            ("analysis_circling_grace_spin", "Circling grace", "circling_grace_s", 0, 300, 10, int(self.GAGGLE_EVENT_CIRCLING_GRACE_S), self._on_analysis_settings_changed, " s"),
+            ("analysis_day_min_flights_spin", "Day min valid flights", "day_min_valid_flights", 1, 50, 1, int(self.analysis_default_parameters.day_min_valid_flights), self._on_analysis_settings_changed, ""),
+            ("analysis_resample_spin", "Resample interval", "resample_interval_s", 1, 30, 1, self.analysis_default_parameters.resample_interval_s, self._on_analysis_settings_changed, " s"),
+        ]
+        for attr_name, label, field_name, minimum, maximum, step, value, on_change, suffix in spin_specs:
+            self._add_analysis_spin_setting(
+                core_form,
+                attr_name=attr_name,
+                label=label,
+                field_name=field_name,
+                minimum=minimum,
+                maximum=maximum,
+                step=step,
+                value=value,
+                on_change=on_change,
+                suffix=suffix,
+            )
+
+        combo_specs = [
+            ("analysis_normalization_combo", "Normalization", "normalization_mode", ["both", "starters", "pilot_minutes"], self.analysis_default_parameters.normalization_mode),
+            ("analysis_late_rule_combo", "Late starter rule", "late_starter_rule", ["median_split", "upper_quartile"], self.analysis_default_parameters.late_starter_rule),
+            ("analysis_aggregation_combo", "Aggregation", "aggregation_method", ["median_iqr", "median_mad"], self.analysis_default_parameters.aggregation_method),
+            ("analysis_distance_method_combo", "Distance method", "distance_method", ["geodesic", "local_projection"], self.analysis_default_parameters.distance_method),
+            ("analysis_altitude_source_combo", "Altitude source", "altitude_source", ["any", "gnss_alt", "press_alt", "alt"], self.analysis_default_parameters.altitude_source),
+        ]
+        for attr_name, label, field_name, items, current_text in combo_specs:
+            self._add_analysis_combo_setting(
+                core_form,
+                attr_name=attr_name,
+                label=label,
+                field_name=field_name,
+                items=items,
+                current_text=current_text,
+                on_change=self._on_analysis_settings_changed,
+            )
+
+        layout.addLayout(core_form)
+
+        self.analysis_impact_label = QLabel("")
+        self.analysis_fingerprint_label = QLabel("")
+        self.analysis_changed_label = QLabel("")
+        self.analysis_validation_label = QLabel("")
+        layout.addWidget(self.analysis_impact_label)
+        layout.addWidget(self.analysis_fingerprint_label)
+        layout.addWidget(self.analysis_changed_label)
+        layout.addWidget(self.analysis_validation_label)
+
+        button_row = QHBoxLayout()
+        self.analysis_dry_run_button = QPushButton("Dry run")
+        self.analysis_run_button = QPushButton("Run analysis")
+        self.analysis_dry_run_button.clicked.connect(self._analysis_dry_run)
+        self.analysis_run_button.clicked.connect(self._analysis_run)
+        button_row.addWidget(self.analysis_dry_run_button)
+        button_row.addWidget(self.analysis_run_button)
+        button_row.addStretch(1)
+        layout.addLayout(button_row)
+
+        self._refresh_analysis_setup_summary()
+
+    @staticmethod
+    def _impact_text(label: str, field_name: str) -> str:
+        impact = parameter_impact(field_name).value
+        return f"{label} ({impact})"
+
+    def _collect_analysis_parameters(self) -> AnalysisParameters:
+        return AnalysisParameters(**{
+            "max_distance_m": int(self.analysis_distance_spin.value()),
+            "max_time_delta_s": int(self.analysis_time_spin.value()),
+            "max_altitude_delta_m": int(self.analysis_altitude_spin.value()),
+            "min_cluster_size": int(self.analysis_min_size_spin.value()),
+            "persistence_s": int(self.analysis_persistence_spin.value()),
+            "break_distance_m": int(self.analysis_break_distance_spin.value()),
+            "break_duration_s": int(self.analysis_break_duration_spin.value()),
+            "circling_grace_s": int(self.analysis_circling_grace_spin.value()),
+            "day_min_valid_flights": int(self.analysis_day_min_flights_spin.value()),
+            "normalization_mode": str(self.analysis_normalization_combo.currentText()),
+            "late_starter_rule": str(self.analysis_late_rule_combo.currentText()),
+            "aggregation_method": str(self.analysis_aggregation_combo.currentText()),
+            "resample_interval_s": int(self.analysis_resample_spin.value()),
+            "distance_method": str(self.analysis_distance_method_combo.currentText()),
+            "altitude_source": str(self.analysis_altitude_source_combo.currentText()),
+        })
+
+    def _refresh_analysis_setup_summary(self) -> None:
+        parameters = self._collect_analysis_parameters()
+        impact = highest_change_impact(parameters, self.analysis_default_parameters)
+        changed = changed_fields(parameters, self.analysis_default_parameters)
+        fingerprint = parameter_fingerprint(parameters, analysis_version=self.analysis_version)
+        validation = validate_flights(
+            self.scene_state.active_flights,
+            day_min_valid_flights=parameters.day_min_valid_flights,
+        )
+
+        self.analysis_scope_label.setText(
+            f"Scope: {len(self.scene_state.active_flights)} active flights selected for analysis"
+        )
+        self.analysis_impact_label.setText(
+            f"Recompute impact: {impact.value}"
+        )
+        self.analysis_fingerprint_label.setText(
+            f"Analysis version: {self.analysis_version} | parameter fingerprint: {fingerprint}"
+        )
+        changed_text = ", ".join(changed) if changed else "none"
+        self.analysis_changed_label.setText(f"Changed from baseline: {changed_text}")
+
+        warnings = validation.warnings
+        if warnings:
+            self.analysis_validation_label.setText(
+                "Pre-run validation: " + " | ".join(warnings)
+            )
+        else:
+            self.analysis_validation_label.setText("Pre-run validation: no blocking warnings")
+
+    def _on_analysis_core_gaggle_changed(self) -> None:
+        if self._analysis_control_sync:
+            return
+        self._sync_spin_values([
+            (self.analysis_distance_spin, self.gaggle_distance_spin),
+            (self.analysis_time_spin, self.gaggle_time_spin),
+            (self.analysis_altitude_spin, self.gaggle_altitude_spin),
+            (self.analysis_min_size_spin, self.gaggle_min_size_spin),
+        ])
+        self._refresh_analysis_setup_summary()
+
+    def _on_analysis_settings_changed(self) -> None:
+        if self._analysis_control_sync:
+            return
+        self.GAGGLE_ACTIVE_PERSISTENCE_S = float(self.analysis_persistence_spin.value())
+        self.GAGGLE_EVENT_BREAK_DISTANCE_M = float(self.analysis_break_distance_spin.value())
+        self.GAGGLE_EVENT_BREAK_DURATION_S = float(self.analysis_break_duration_spin.value())
+        self.GAGGLE_EVENT_CIRCLING_GRACE_S = float(self.analysis_circling_grace_spin.value())
+        self._update_gaggle_settings_summary()
+        if self.track_xs and len(self.scene_state.active_flights) >= 2:
+            self._render_gaggle_reference_zones(restart_if_running=True)
+            self._render_active_gaggles()
+        self._refresh_analysis_setup_summary()
+
+    def _sync_analysis_controls_from_gaggle(self) -> None:
+        if self._analysis_control_sync:
+            return
+        self._sync_spin_values([
+            (self.gaggle_distance_spin, self.analysis_distance_spin),
+            (self.gaggle_time_spin, self.analysis_time_spin),
+            (self.gaggle_altitude_spin, self.analysis_altitude_spin),
+            (self.gaggle_min_size_spin, self.analysis_min_size_spin),
+        ])
+
+    def _sync_spin_values(self, mappings: list[tuple[QSpinBox, QSpinBox]]) -> None:
+        self._analysis_control_sync = True
+        try:
+            for source, target in mappings:
+                target.setValue(int(source.value()))
+        finally:
+            self._analysis_control_sync = False
+
+    def _analysis_dry_run(self) -> None:
+        self._refresh_analysis_setup_summary()
+        self.status_controller.set_text("Status: analysis dry run completed; review setup warnings and impact")
+
+    def _analysis_run(self) -> None:
+        self._refresh_analysis_setup_summary()
+        self.status_controller.set_text("Status: analysis run scaffold is ready; backend execution pipeline is the next step")
+
+    def _on_tab_changed(self, tab_index: int) -> None:
+        if self.tabs.widget(tab_index) is self.analysis_tab:
+            self._refresh_analysis_setup_summary()
 
     def _on_gaggle_settings_changed(self) -> None:
         self.gaggle_distance_m = float(self.gaggle_distance_spin.value())
@@ -606,6 +967,8 @@ class MainWindow(QMainWindow):
         self.gaggle_min_cluster_size = int(self.gaggle_min_size_spin.value())
         self._gaggle_clusters_ready = False
         self._update_gaggle_settings_summary()
+        self._sync_analysis_controls_from_gaggle()
+        self._refresh_analysis_setup_summary()
         if self.track_xs and len(self.scene_state.active_flights) >= 2:
             self._render_gaggle_reference_zones(restart_if_running=True)
             self._render_active_gaggles()
@@ -661,119 +1024,6 @@ class MainWindow(QMainWindow):
             if member.get("flight_id") is not None
         }
 
-    def _merge_drifting_clusters(
-        self,
-        clusters: list[dict],
-        *,
-        max_gap_s: float,
-        reference_time: float | None = None,
-    ) -> list[dict]:
-        if not clusters:
-            return []
-
-        sorted_clusters = sorted(clusters, key=lambda item: float(item.get("timestamp", 0.0)))
-        zones: list[dict] = []
-
-        for cluster in sorted_clusters:
-            centroid = cluster.get("centroid") or {}
-            lat = centroid.get("lat")
-            lon = centroid.get("lon")
-            if lat is None or lon is None:
-                continue
-            ts = float(cluster.get("timestamp", 0.0))
-            flight_ids = self._cluster_flight_ids(cluster)
-            if not flight_ids:
-                continue
-
-            best_zone: dict | None = None
-            best_score: float | None = None
-            for zone in zones:
-                dt = ts - float(zone["last_ts"])
-                if dt < 0.0 or dt > max_gap_s:
-                    continue
-                overlap = len(flight_ids & zone["flight_ids"])
-                if overlap < self.GAGGLE_ZONE_MIN_MEMBER_OVERLAP:
-                    continue
-                dist_m = _distance_between_points_m(
-                    float(lat),
-                    float(lon),
-                    float(zone["centroid_lat"]),
-                    float(zone["centroid_lon"]),
-                )
-                allowed_m = self.GAGGLE_ZONE_LINK_BASE_DISTANCE_M + self.GAGGLE_ZONE_DRIFT_SPEED_MPS * dt
-                if dist_m > allowed_m:
-                    continue
-                score = (dist_m / max(allowed_m, 1.0)) - (0.12 * min(overlap, 3))
-                if best_score is None or score < best_score:
-                    best_score = score
-                    best_zone = zone
-
-            if best_zone is None:
-                zones.append({
-                    "first_ts": ts,
-                    "last_ts": ts,
-                    "centroid_lat": float(lat),
-                    "centroid_lon": float(lon),
-                    "sample_count": 1,
-                    "flight_ids": set(flight_ids),
-                    "peak_size": int(cluster.get("size", 0)),
-                    "max_radius_m": float(cluster.get("radius_m", 0.0)),
-                    "representative": cluster,
-                })
-                continue
-
-            count = int(best_zone["sample_count"])
-            weight = max(1, int(cluster.get("size", 1)))
-            total_weight = count + weight
-            best_zone["centroid_lat"] = ((float(best_zone["centroid_lat"]) * count) + (float(lat) * weight)) / total_weight
-            best_zone["centroid_lon"] = ((float(best_zone["centroid_lon"]) * count) + (float(lon) * weight)) / total_weight
-            best_zone["sample_count"] = count + 1
-            best_zone["last_ts"] = ts
-            best_zone["flight_ids"].update(flight_ids)
-            best_zone["peak_size"] = max(int(best_zone["peak_size"]), int(cluster.get("size", 0)))
-            best_zone["max_radius_m"] = max(float(best_zone["max_radius_m"]), float(cluster.get("radius_m", 0.0)))
-
-            representative = best_zone.get("representative")
-            if representative is None:
-                best_zone["representative"] = cluster
-            elif reference_time is None:
-                if int(cluster.get("size", 0)) > int(representative.get("size", 0)):
-                    best_zone["representative"] = cluster
-            else:
-                rep_ts = float(representative.get("timestamp", 0.0))
-                rep_delta = abs(rep_ts - reference_time)
-                new_delta = abs(ts - reference_time)
-                if (new_delta < rep_delta) or (new_delta == rep_delta and int(cluster.get("size", 0)) > int(representative.get("size", 0))):
-                    best_zone["representative"] = cluster
-
-        merged: list[dict] = []
-        for zone in zones:
-            representative = zone.get("representative")
-            if representative is None:
-                continue
-            merged_cluster = dict(representative)
-            merged_cluster["centroid"] = {
-                "lat": float(zone["centroid_lat"]),
-                "lon": float(zone["centroid_lon"]),
-            }
-            merged_cluster["size"] = int(zone["peak_size"])
-            merged_cluster["radius_m"] = float(zone["max_radius_m"])
-            merged_cluster["first_timestamp"] = float(zone["first_ts"])
-            merged_cluster["last_timestamp"] = float(zone["last_ts"])
-            merged_cluster["zone_samples"] = int(zone["sample_count"])
-            merged_cluster["zone_flight_ids"] = sorted(zone["flight_ids"])
-            merged.append(merged_cluster)
-
-        return sorted(
-            merged,
-            key=lambda item: (
-                int(item.get("size", 0)),
-                int(item.get("zone_samples", 1)),
-                float(item.get("timestamp", 0.0)),
-            ),
-            reverse=True,
-        )
-
     def _render_gaggle_reference_zones(self, *, restart_if_running: bool = False) -> None:
         flights = self.scene_state.active_flights
         if len(flights) < 2:
@@ -804,6 +1054,9 @@ class MainWindow(QMainWindow):
             max_distance_m=self.gaggle_distance_m,
             max_time_delta_s=self.gaggle_time_delta_s,
             max_altitude_delta_m=self.gaggle_altitude_delta_m,
+            break_distance_m=self.GAGGLE_EVENT_BREAK_DISTANCE_M,
+            break_duration_s=self.GAGGLE_EVENT_BREAK_DURATION_S,
+            circling_grace_s=self.GAGGLE_EVENT_CIRCLING_GRACE_S,
             min_cluster_size=self.gaggle_min_cluster_size,
         )
         worker.moveToThread(thread)
@@ -830,12 +1083,12 @@ class MainWindow(QMainWindow):
 
     def _draw_gaggle_reference_zones(self, clusters: list[dict]) -> None:
         self._clear_gaggle_reference_overlays()
-        merged = self._merge_drifting_clusters(
-            clusters,
-            max_gap_s=self.GAGGLE_ZONE_MAX_GAP_S,
+        self.gaggle_clusters = sorted(
+            list(clusters),
+            key=lambda item: (int(item.get("size", 0)), float(item.get("first_timestamp", item.get("timestamp", 0.0)))),
+            reverse=True,
         )
-        self.gaggle_clusters = merged
-        reduced = self._reduce_reference_clusters(merged)
+        reduced = self._reduce_reference_clusters(self.gaggle_clusters)
         zone_xs: list[float] = []
         zone_ys: list[float] = []
         zone_sizes: list[float] = []
@@ -980,13 +1233,9 @@ class MainWindow(QMainWindow):
         clusters = [
             cluster
             for cluster in self.gaggle_clusters_raw
-            if 0.0 <= (current_time - float(cluster.get("timestamp", current_time))) <= active_persistence_s
+            if float(cluster.get("first_timestamp", cluster.get("timestamp", current_time))) <= current_time
+            <= float(cluster.get("last_timestamp", cluster.get("timestamp", current_time))) + active_persistence_s
         ]
-        clusters = self._merge_drifting_clusters(
-            clusters,
-            max_gap_s=max(self.gaggle_time_delta_s * 2.0, 60.0),
-            reference_time=current_time,
-        )
         clusters = sorted(clusters, key=lambda item: int(item.get("size", 0)), reverse=True)
         clusters = clusters[: self.GAGGLE_MAX_ACTIVE_CLUSTERS]
 
@@ -994,8 +1243,8 @@ class MainWindow(QMainWindow):
         member_ys: list[float] = []
         member_seen: set[tuple[int, int]] = set()
         for cluster in clusters:
-            cluster_ts = float(cluster.get("timestamp", current_time))
-            cluster_age_s = max(0.0, current_time - cluster_ts)
+            cluster_end_ts = float(cluster.get("last_timestamp", cluster.get("timestamp", current_time)))
+            cluster_age_s = max(0.0, current_time - cluster_end_ts)
             fade_ratio = max(0.3, min(1.0, 1.0 - (cluster_age_s / max(active_persistence_s, 1.0))))
             strength = self._compute_cluster_strength(cluster, current_time)
             style = self._gaggle_strength_style(strength)
@@ -1025,7 +1274,7 @@ class MainWindow(QMainWindow):
             self.plot_widget.addItem(centroid_item)
             self.gaggle_overlay_items.append(centroid_item)
 
-            if cluster_age_s > self.gaggle_time_delta_s:
+            if cluster_age_s > self.GAGGLE_EVENT_CIRCLING_GRACE_S:
                 continue
 
             for member in cluster["members"]:

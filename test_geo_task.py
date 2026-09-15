@@ -7,7 +7,7 @@ from unittest.mock import patch
 from PySide6.QtWidgets import QApplication, QTreeWidget
 
 from qt_app import MainWindow, build_contest_download_plan
-from qt_helpers import build_contest_result_lines
+from qt_helpers import build_contest_result_lines, infer_contest_class_day_from_path
 from map_helpers import GliderTrace
 from flight_model import FlightRecord, load_flight_record, serialize_flight_record
 from qt_viewer import recent_track_window_for_record
@@ -428,6 +428,59 @@ class SectorGeometryTests(unittest.TestCase):
         process_events_until(lambda: len(window.scene_state.active_flights) == 2)
         self.assertEqual(len(window.scene_state.active_flights), 2)
         self.assertGreaterEqual(len(window.visible_flight_markers), 2)
+        window.close()
+        app.quit()
+
+    def test_infer_contest_class_day_from_path(self):
+        info = infer_contest_class_day_from_path(
+            "igc_downloads/open-standard-15m-nationals-2026-husbands-bosworth-2026/15 Metre/2026-08-08/688_10.igc"
+        )
+
+        self.assertEqual(info["contest_name"], "open-standard-15m-nationals-2026-husbands-bosworth-2026")
+        self.assertEqual(info["class_name"], "15 Metre")
+        self.assertEqual(info["day"], "2026-08-08")
+
+    def test_main_window_start_time_filters_by_day_and_class(self):
+        app = QApplication.instance() or QApplication([])
+        window = MainWindow()
+
+        flights = [
+            {
+                "file_path": "igc_downloads/contest-a/15 Metre/2026-08-08/a1.igc",
+                "start_time": "2024-01-01T10:00:00Z",
+                "class_name": "15 Metre",
+                "day": "2026-08-08",
+            },
+            {
+                "file_path": "igc_downloads/contest-a/Club/2026-08-08/c1.igc",
+                "start_time": "2024-01-01T10:05:00Z",
+                "class_name": "Club",
+                "day": "2026-08-08",
+            },
+            {
+                "file_path": "igc_downloads/contest-a/15 Metre/2026-08-09/a2.igc",
+                "start_time": "2024-01-02T10:00:00Z",
+                "class_name": "15 Metre",
+                "day": "2026-08-09",
+            },
+        ]
+        window.refresh_start_time_list(flights)
+
+        self.assertGreater(window.start_times_day_filter.count(), 2)
+        self.assertGreater(window.start_times_class_filter.count(), 2)
+
+        window.start_times_day_filter.setCurrentText("2026-08-09")
+        process_events_until(lambda: window.start_times_tree.topLevelItemCount() == 1)
+        day_item = window.start_times_tree.topLevelItem(0)
+        self.assertEqual(day_item.text(0), "2026-08-09")
+
+        window.start_times_day_filter.setCurrentText("All days")
+        window.start_times_class_filter.setCurrentText("Club")
+        process_events_until(lambda: window.start_times_tree.topLevelItemCount() == 1)
+        class_day_item = window.start_times_tree.topLevelItem(0)
+        self.assertEqual(class_day_item.text(0), "2026-08-08")
+        self.assertEqual(class_day_item.child(0).text(0), "Club")
+
         window.close()
         app.quit()
 

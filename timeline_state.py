@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from flight_fix_utils import build_time_offsets
+
 
 @dataclass
 class TimelineState:
@@ -11,44 +13,8 @@ class TimelineState:
 
     @classmethod
     def from_flight(cls, flight_record) -> "TimelineState":
-        offsets = cls._build_time_offsets(flight_record.fixes)
+        offsets = build_time_offsets(flight_record.fixes)
         return cls(time_offsets=offsets, total_seconds=offsets[-1] if offsets else 0.0)
-
-    @staticmethod
-    def _build_time_offsets(fixes: list) -> list[float]:
-        if not fixes:
-            return []
-
-        first_timestamp = getattr(fixes[0], "timestamp", None)
-        if first_timestamp is None:
-            return [float(i) for i in range(len(fixes))]
-
-        offsets: list[float] = []
-        previous = 0.0
-        for idx, fix in enumerate(fixes):
-            timestamp = getattr(fix, "timestamp", None)
-            if timestamp is None:
-                offsets.append(float(idx))
-                previous = offsets[-1]
-                continue
-
-            if isinstance(timestamp, (int, float)) and isinstance(first_timestamp, (int, float)):
-                delta = float(timestamp - first_timestamp)
-            else:
-                delta_obj = timestamp - first_timestamp
-                if hasattr(delta_obj, "total_seconds"):
-                    delta = float(delta_obj.total_seconds())
-                else:
-                    delta = float(delta_obj)
-
-            if delta < previous:
-                delta = previous
-            offsets.append(float(delta))
-            previous = float(delta)
-
-        if offsets[-1] <= 0.0:
-            return [float(i) for i in range(len(fixes))]
-        return offsets
 
     def set_index(self, value: int) -> None:
         if not self.time_offsets:

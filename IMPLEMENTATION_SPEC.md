@@ -81,6 +81,293 @@ Proportion of join events in which a pilot joins a pre-existing gaggle rather th
 8. Day-to-Day Consistency
 Spread measure across analysed days for the competition, reported alongside headline competition summaries.
 
+## IGC Statistics Contract v1
+
+This section defines the first code-facing export contract for IGC-oriented outputs.
+
+Contract metadata:
+
+- `contract_name`: `igc_statistics`
+- `contract_version`: `1.0.0`
+- `analysis_version`: from analysis engine (`v1` initially)
+- `parameter_fingerprint`: 16-char hash from current analysis parameters
+- `generated_at_utc`: ISO-8601 timestamp in UTC
+
+### Dataset Scope
+
+The contract publishes three tabular datasets per analysis run:
+
+1. Flight-day metrics
+One row per analysed flight on a specific class-day.
+
+2. Day summary metrics
+One row per analysed class-day.
+
+3. Competition summary metrics
+One row per analysed competition-class aggregate.
+
+All metric fields below are required unless the nullability rule says otherwise.
+
+### Key And Identity Fields
+
+Identity fields used across all datasets:
+
+- `competition_id`: stable slug-like id for contest
+- `competition_name`: human-readable contest name
+- `class_id`: stable class slug
+- `class_name`: human-readable class name
+- `day_id`: `YYYY-MM-DD` (day-scoped datasets only)
+- `flight_id`: stable file- or CN-based id (flight-day only)
+- `analysis_version`
+- `parameter_fingerprint`
+
+## Flight-Day Metrics Schema (v1)
+
+One row per valid analysed flight on one day.
+
+Required fields:
+
+- `competition_id` (string)
+- `class_id` (string)
+- `day_id` (date string, `YYYY-MM-DD`)
+- `flight_id` (string)
+- `pilot_code` (string, nullable)
+- `start_time_utc_s` (number, nullable)
+- `start_rank` (integer, nullable)
+- `airborne_duration_s` (number)
+- `entered_any_gaggle` (boolean)
+- `first_gaggle_join_utc_s` (number, nullable)
+- `time_to_first_gaggle_join_s` (number, nullable)
+- `gaggle_exposure_s` (number)
+- `gaggle_exposure_ratio` (number in `[0,1]`)
+- `joined_established_gaggle` (boolean)
+- `established_join_count` (integer, default `0`)
+- `analysis_version` (string)
+- `parameter_fingerprint` (string)
+
+Nullability and rules:
+
+- `start_time_utc_s` and `start_rank` may be null when start cannot be derived.
+- `first_gaggle_join_utc_s` and `time_to_first_gaggle_join_s` are null when `entered_any_gaggle=false`.
+- `joined_established_gaggle=false` when no join events are detected.
+
+## Day Summary Metrics Schema (v1)
+
+One row per analysed class-day.
+
+Required fields:
+
+- identity fields for competition/class/day
+- `starter_count` (integer)
+- `valid_flight_count` (integer)
+- `excluded_flight_count` (integer)
+- `gaggle_participation_rate` (number in `[0,1]`)
+- `peak_gaggle_size` (integer)
+- `normalized_peak_gaggle_size` (number in `[0,1]`)
+- `gaggle_time_exposure_ratio` (number in `[0,1]`)
+- `median_time_to_first_gaggle_join_s` (number, nullable)
+- `late_starter_join_rate` (number in `[0,1]`, nullable)
+- `gaggle_start_time_mixing_iqr_s` (number, nullable)
+- `established_gaggle_accretion_rate` (number in `[0,1]`, nullable)
+- `event_count` (integer)
+- `quality_flag` (enum: `ok`, `partial`, `insufficient_data`)
+- `quality_notes` (string, nullable)
+- `analysis_version` (string)
+- `parameter_fingerprint` (string)
+
+Nullability and rules:
+
+- `median_time_to_first_gaggle_join_s` is null when no flight joins any gaggle.
+- `late_starter_join_rate` is null when late-starter denominator is zero.
+- `gaggle_start_time_mixing_iqr_s` is null when fewer than two distinct start times exist in event participation.
+- `established_gaggle_accretion_rate` is null when no join events exist.
+
+## Competition Summary Metrics Schema (v1)
+
+One row per competition-class aggregate.
+
+Required fields:
+
+- identity fields for competition/class
+- `year` (integer)
+- `analysed_day_count` (integer)
+- `skipped_day_count` (integer)
+- `median_gaggle_participation_rate` (number in `[0,1]`, nullable)
+- `iqr_gaggle_participation_rate` (number, nullable)
+- `median_normalized_peak_gaggle_size` (number in `[0,1]`, nullable)
+- `iqr_normalized_peak_gaggle_size` (number, nullable)
+- `median_gaggle_time_exposure_ratio` (number in `[0,1]`, nullable)
+- `iqr_gaggle_time_exposure_ratio` (number, nullable)
+- `median_time_to_first_gaggle_join_s` (number, nullable)
+- `iqr_time_to_first_gaggle_join_s` (number, nullable)
+- `median_late_starter_join_rate` (number in `[0,1]`, nullable)
+- `iqr_late_starter_join_rate` (number, nullable)
+- `median_gaggle_start_time_mixing_iqr_s` (number, nullable)
+- `iqr_gaggle_start_time_mixing_iqr_s` (number, nullable)
+- `median_established_gaggle_accretion_rate` (number in `[0,1]`, nullable)
+- `iqr_established_gaggle_accretion_rate` (number, nullable)
+- `day_to_day_consistency_score` (number in `[0,1]`, nullable)
+- `completeness_flag` (enum: `ok`, `partial`, `insufficient_data`)
+- `completeness_notes` (string, nullable)
+- `analysis_version` (string)
+- `parameter_fingerprint` (string)
+
+Nullability and rules:
+
+- Aggregated metrics are null when fewer than one valid day contributes to that metric.
+- IQR fields are null when fewer than two valid day values exist.
+
+## Canonical Metric Definitions (v1)
+
+All rates are computed in real-valued form before rounding.
+
+1. Gaggle Participation Rate (day)
+
+`gaggle_participation_rate = flights_with_entered_any_gaggle / starter_count`
+
+2. Normalized Peak Gaggle Size (day)
+
+`normalized_peak_gaggle_size = peak_gaggle_size / starter_count`
+
+3. Gaggle Time Exposure (day)
+
+`gaggle_time_exposure_ratio = total_gaggle_exposure_s / total_airborne_duration_s`
+
+4. Median Time To First Gaggle Join (day)
+
+Median of `time_to_first_gaggle_join_s` for flights where value is not null.
+
+5. Late-Starter Join Rate (day)
+
+`late_starter_join_rate = late_starters_joined_existing / late_starter_count`
+
+6. Gaggle Start-Time Mixing (day)
+
+For each event, compute start-time spread in seconds across participating flights with known starts; report day median IQR-style spread as `gaggle_start_time_mixing_iqr_s`.
+
+7. Established-Gaggle Accretion Rate (day)
+
+`established_gaggle_accretion_rate = established_join_events / total_join_events`
+
+8. Day-To-Day Consistency (competition)
+
+Derived monotonic score in `[0,1]` using normalized dispersion across primary day-level metrics; exact transform is versioned under `analysis_version` and must be documented in code.
+
+## Units, Rounding, And Serialization
+
+Unit policy:
+
+- durations: seconds (`_s` suffix)
+- rates/ratios: unitless real numbers in `[0,1]`
+- counts: integers
+- date: `YYYY-MM-DD`
+
+Rounding policy for exports:
+
+- rates/ratios: round to 4 decimal places
+- duration metrics in seconds: round to nearest integer second
+- consistency score: round to 4 decimal places
+- do not round internal computation values before final export fields
+
+Serialization policy:
+
+- JSON: numbers must remain numeric (no stringified numbers)
+- CSV: empty field represents null
+- booleans in CSV: `true` / `false`
+
+## Edge-Case Rules
+
+1. Zero starters on a day
+
+- mark `quality_flag=insufficient_data`
+- set rate metrics null
+- keep row with explicit notes
+
+2. No valid analysed flights
+
+- mark `quality_flag=insufficient_data`
+- all derived day metrics null except counts
+
+3. No gaggle events detected
+
+- set participation/exposure/accretion metrics to `0` where denominator is valid
+- set first-join timing metrics null
+
+4. Missing start times for subset of flights
+
+- exclude unknown starts from start-rank and start-mixing denominators
+- keep day valid if minimum valid-flight threshold is met
+- append quality note with missing-start count
+
+5. Late-starter denominator equals zero
+
+- set `late_starter_join_rate=null`
+- add quality note `no late starters under current rule`
+
+6. Total airborne duration is zero
+
+- set `gaggle_time_exposure_ratio=null`
+- set day `quality_flag=partial`
+
+7. Single analysed day in competition summary
+
+- median metrics populated from the single day
+- all IQR fields null
+- completeness flag remains `partial` unless policy explicitly allows `ok`
+
+## Acceptance Checks (Release Gate For v1)
+
+Every generated result set must pass all checks below.
+
+### Structural Checks
+
+- output includes all required datasets and fields for contract v1
+- `contract_version`, `analysis_version`, and `parameter_fingerprint` are present in each row set
+- primary key uniqueness holds:
+	- flight-day: (`competition_id`, `class_id`, `day_id`, `flight_id`)
+	- day summary: (`competition_id`, `class_id`, `day_id`)
+	- competition summary: (`competition_id`, `class_id`)
+
+### Domain Checks
+
+- all rate/ratio fields are either null or in `[0,1]`
+- all count fields are integers `>=0`
+- all duration fields are either null or `>=0`
+- `valid_flight_count <= starter_count` for each day
+- `peak_gaggle_size <= starter_count` when `starter_count > 0`
+
+### Consistency Checks
+
+- for each day row:
+	- if `event_count == 0`, then `gaggle_participation_rate == 0` (unless null due to insufficient data)
+	- if `gaggle_participation_rate == 0`, then `median_time_to_first_gaggle_join_s` must be null
+- competition medians must be computed only from non-null day values of the same metric
+- competition IQR fields must be null when contributing day count for that metric is `<2`
+
+### Reproducibility Checks
+
+- re-running unchanged input with identical parameters must produce identical summary rows (except `generated_at_utc`)
+- changed `parameter_fingerprint` must invalidate previous result set comparisons unless explicitly grouped by fingerprint
+
+### Data-Quality Checks
+
+- any day below `day_min_valid_flights` must be flagged and excluded from competition headline aggregation
+- missing-start and missing-altitude counts must be surfaced in quality notes or side diagnostics
+
+## Acceptance Check Outcome Contract
+
+Each analysis run should emit a validation manifest with:
+
+- `contract_version`
+- `analysis_version`
+- `parameter_fingerprint`
+- `checks_passed` (boolean)
+- `failed_checks` (list of check ids)
+- `warning_checks` (list of check ids)
+- `generated_at_utc`
+
+If `checks_passed=false`, headline competition outputs must be marked non-publishable in the UI.
+
 ## Required Normalization Rules
 
 To keep cross-competition comparisons defensible:
