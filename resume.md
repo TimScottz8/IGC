@@ -1,80 +1,65 @@
 # Resume Guide
 
-## Orientation
-Start with:
-- [README.md](README.md) for the current project scope
-- [Pathway.md](Pathway.md) for the long-term product goal
-- [Progress.md](Progress.md) for the latest working state and immediate next tasks
-- [IMPLEMENTATION_SPEC.md](IMPLEMENTATION_SPEC.md) for the agreed implementation contract for competition-scale gaggle analysis, persistence, and reporting
+## Mission and Product Goal
+This project is an analysis-first desktop app for producing policy-grade evidence for the IGC.
 
-## Strategic update
-The product direction has now been sharpened beyond viewer workflow refinement.
+Primary objective:
+- quantify how gaggle behavior and start-time mixing change across days, competitions, and years
+- produce reproducible, versioned outputs suitable for rule-discussion evidence
 
-The app's ultimate purpose is to generate policy-grade evidence for the International Gliding Commission about whether increasing practical availability of live positional awareness is associated with safety and fairness changes large enough to justify rule discussion.
+Core contract source:
+- [IMPLEMENTATION_SPEC.md](IMPLEMENTATION_SPEC.md) (includes IGC Statistics Contract v1 and acceptance checks)
 
-The current agreed implementation direction is:
-- analyse whole competitions, not isolated flights
-- compute day-level summaries first, then aggregate to competition-level summaries
-- compare competitions over time rather than relying on a binary OGN adoption date
-- persist analysis layers so common gaggle-parameter changes do not require reparsing raw flights
-- save graphs and summaries with parameter fingerprints and analysis-version provenance
+## Current Working State (2026-09-15)
+The app now supports whole-competition and multi-competition workflows, not just individual flights.
 
-Before implementing major new behaviour, read [IMPLEMENTATION_SPEC.md](IMPLEMENTATION_SPEC.md) and treat it as the primary contract for the next build stage.
+Delivered this session:
+- lifecycle-based gaggle events (join + break distance/duration + circling grace)
+- analysis setup model and fingerprinting in [analysis_setup.py](analysis_setup.py)
+- deterministic statistics export scaffold and validation manifest in [igc_statistics.py](igc_statistics.py)
+- local contest multi-select loading in the Download tab
+- viewer day/class filters to narrow displayed flights after bulk load
+- selection precedence fix (most-specific nodes win) for both local tree and viewer tree
+- CPU-first performance improvements:
+1. parse only cache misses when opening selections
+2. batched parser-service requests
+3. multi-core parsing for large batches in parser service
+4. gaggle compute: thermal-segment LRU cache + precomputed time-window bounds
 
-## Current status
-The app is now a working multi-flight desktop viewer with a much more advanced thermal gaggle workflow than the previous checkpoint, but the gaggle overlay behaviour is still under active tuning.
+## Architecture Pointers
+Read these first when resuming:
+- [README.md](README.md)
+- [Pathway.md](Pathway.md)
+- [Progress.md](Progress.md)
+- [qt_app.py](qt_app.py)
+- [qt_viewer.py](qt_viewer.py)
+- [qt_helpers.py](qt_helpers.py)
+- [gaggle_analysis.py](gaggle_analysis.py)
+- [flight_model.py](flight_model.py)
+- [analysis_setup.py](analysis_setup.py)
+- [igc_statistics.py](igc_statistics.py)
 
-The app currently supports the following core Qt workflow:
-- contest discovery from SoaringSpot
-- grouping contest results by class and day
-- local browsing of downloaded contests
-- selecting and downloading chosen flight files
-- opening one or more flights from local or downloaded sources
-- loading flights through a cache-backed record model
-- dynamically selecting and deselecting gliders while keeping the same playback time
-- rendering full tracks while static and snail trails while animating
-- detecting thermal-only gaggles with distance, time, vertical-separation, and minimum-size filters
-- showing static whole-flight gaggle reference zones
-- showing current-time-focused gaggle overlays during animation
-- running gaggle detection off the UI thread with a progress bar and cancel button
+## Verification Baseline
+Recent validated test sets:
+- `.venv/bin/python -m pytest -q test_qt_helpers_selection.py`
+- `.venv/bin/python -m pytest -q test_geo_task.py -k "infer_contest_class_day_from_path or start_time_filters_by_day_and_class"`
+- `.venv/bin/python -m pytest -q test_gaggle_analysis.py test_analysis_setup.py test_igc_statistics.py`
 
-This is now a real multi-flight contest-analysis tool in an active gaggle-visualisation phase, not just a stable viewer refactor.
+Recent smoke checks:
+- `QT_QPA_PLATFORM=offscreen .venv/bin/python -c "import qt_app, qt_viewer, flight_model; print('imports_ok')"`
 
-## Verified working baseline
-The latest successful verification commands were:
+## Known Risks / Notes
+- full Qt-heavy suite can intermittently crash in this environment with SIGSEGV; rely on focused tests + smoke checks for iterative changes
+- parser multi-core mode currently has thresholding to avoid overhead on small batches
+- lifecycle event semantics are implemented and tested, but large multi-day tuning remains open
 
-- `.venv/bin/python -m py_compile flight_model.py gaggle_analysis.py qt_app.py qt_viewer.py test_gaggle_analysis.py`
+## Next Session Priority
+1. add visible load diagnostics in UI status: selected count, cache hits/misses, parse time
+2. benchmark end-to-end timings on one full competition and one multi-competition selection
+3. begin wiring actual day-summary/competition-summary generation from loaded events into export pipeline
+4. add “Analyze selected competitions” action from Analysis tab using current filters and active selection scope
 
-Current constraint:
-- `.venv/bin/python -m pytest -q test_gaggle_analysis.py` fails because `pytest` is not installed in the local `.venv`
+## Resume Prompt
+Use this to restart quickly:
 
-Important direct validation already done:
-- real downloaded flight records now preserve altitude values in the parser-service path
-- real-data gaggle clustering returns non-zero clusters once altitude is preserved
-
-## What matters for the next session
-The most important files to review are:
-- [Pathway.md](Pathway.md) — product purpose and long-term goal
-- [Progress.md](Progress.md) — bootstrapping state and next tasks
-- [qt_app.py](qt_app.py) — main Qt window and playback shell
-- [qt_viewer.py](qt_viewer.py) — render state, selection handling, and multi-flight view logic
-- [gaggle_analysis.py](gaggle_analysis.py) — thermal gaggle detection, clustering, multiprocessing, and timing logic
-- [timeline_state.py](timeline_state.py) — playback and time indexing state
-- [scene_state.py](scene_state.py) — active and selected flight state
-- [flight_model.py](flight_model.py) — parser-service record serialization including altitude preservation
-- [test_geo_task.py](test_geo_task.py) and [test_gaggle_analysis.py](test_gaggle_analysis.py) — behaviour contract and regression coverage
-
-## Recommended next step
-The next working session should stay narrow and focus on making the current gaggle overlay semantics trustworthy before expanding analysis scope:
-1. verify that animated current-gaggle circles appear at the expected moments on a known contest day
-2. tune persistence, drift merging, or active-window filtering only after confirming what the viewer is actually showing
-3. consider surfacing drift-merge parameters in the UI if one drifting thermal still becomes several zones
-4. once the overlays are trustworthy, start computing per-flight gaggle summaries tied to start time
-5. install `pytest` into the repo-local `.venv` so future changes can be validated executable-first rather than by compile checks and manual observation
-
-## Best way to resume
-If I am asked to continue, the most useful prompt is:
-
-“Resume from resume.md and continue the thermal gaggle analysis work, focusing first on animated current-gaggle visibility and drift-merged zone behaviour.”
-
-This will immediately orient the work toward the active product goal without losing the recent selection and playback improvements.
+"Resume from [resume.md](resume.md), continue with load diagnostics and competition-scale analysis export wiring, and keep behavior aligned with [IMPLEMENTATION_SPEC.md](IMPLEMENTATION_SPEC.md)."
