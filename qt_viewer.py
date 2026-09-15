@@ -412,7 +412,8 @@ class FlightRenderController(QObject):
                     } | infer_contest_class_day_from_path(record.file_path))
                     for record in records
                 ])
-            self._render_loaded_record(records[0], active_records=records)
+            active_scope = list(self.window.scene_state.active_flights or records)
+            self._render_loaded_record(active_scope[0], active_records=active_scope)
 
         records = self.load_controller.load_records_for_paths(file_paths, on_loaded=on_loaded)
         if records is not None:

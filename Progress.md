@@ -44,6 +44,26 @@ Canonical overview:
 - analysis stack now has a documented, test-covered statistics contract and export scaffolding
 - major bottlenecks addressed in both flight loading and gaggle recompute paths using CPU-first optimizations
 
+### Final end-of-day fixes
+- fixed a remaining viewer-scope bug where bulk-load rendering could override day/class filters and show full competition tracks again
+- filter changes now update active viewer scope immediately, and refresh paths also reapply filters automatically
+- reset filters now restores full loaded scope from the retained loaded-flight metadata set
+- updated selected-files label to reflect current filtered active scope
+- verified with offscreen integration run that:
+1. loading two days produces two active flights
+2. selecting one day/class reduces active scope to one flight
+3. reset returns to full two-flight scope
+
+### Parse/CPU behavior clarification
+- parser now supports multi-core parse for large uncached selections with safe fallback to serial
+- for small selections or mostly cached selections, lower CPU usage is expected by design due to thresholding and cache-hit reuse
+- parser threshold and batching are tuned to avoid multiprocessing overhead on small requests
+
+### Updated next session priorities
+1. add explicit load diagnostics in status text: selected count, cache hits, cache misses, parse workers used, parse elapsed time
+2. run repeatable benchmark on one full competition and one multi-competition selection with cold vs warm cache
+3. wire UI action from Analysis setup to produce day-summary and competition-summary outputs using the contract pipeline
+
 ## Current checkpoint
 The viewer is now beyond the initial multi-flight baseline and has an actively evolving thermal gaggle analysis workflow.
 

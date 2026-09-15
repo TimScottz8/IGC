@@ -25,6 +25,10 @@ Delivered this session:
 2. batched parser-service requests
 3. multi-core parsing for large batches in parser service
 4. gaggle compute: thermal-segment LRU cache + precomputed time-window bounds
+- final viewer-scope fix:
+1. day/class filters now control active map scope immediately
+2. bulk-load no longer overrides filtered scope with full loaded set
+3. reset filters restores full loaded scope from retained loaded metadata
 
 ## Architecture Pointers
 Read these first when resuming:
@@ -47,14 +51,19 @@ Recent validated test sets:
 
 Recent smoke checks:
 - `QT_QPA_PLATFORM=offscreen .venv/bin/python -c "import qt_app, qt_viewer, flight_model; print('imports_ok')"`
+- offscreen integration check confirms filter scope behavior:
+1. two-day load -> 2 active flights
+2. day/class filter -> 1 active flight
+3. reset filters -> back to 2 active flights
 
 ## Known Risks / Notes
 - full Qt-heavy suite can intermittently crash in this environment with SIGSEGV; rely on focused tests + smoke checks for iterative changes
 - parser multi-core mode currently has thresholding to avoid overhead on small batches
 - lifecycle event semantics are implemented and tested, but large multi-day tuning remains open
+- low CPU utilization can still be normal when most selected flights are cache hits
 
 ## Next Session Priority
-1. add visible load diagnostics in UI status: selected count, cache hits/misses, parse time
+1. add visible load diagnostics in UI status: selected count, cache hits/misses, parse workers, parse time
 2. benchmark end-to-end timings on one full competition and one multi-competition selection
 3. begin wiring actual day-summary/competition-summary generation from loaded events into export pipeline
 4. add “Analyze selected competitions” action from Analysis tab using current filters and active selection scope

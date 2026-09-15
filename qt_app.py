@@ -50,6 +50,7 @@ from qt_helpers import (
     build_contest_download_plan,
     build_start_time_entries as format_start_time_entries,
     group_start_time_entries,
+    infer_contest_class_day_from_path,
     normalize_file_selection,
     selected_files_label,
 )
@@ -486,6 +487,7 @@ class MainWindow(QMainWindow):
         self._start_time_flights_all = list(flights)
         self._refresh_start_time_filters()
         self._apply_start_time_filters_to_tree()
+        self._apply_start_time_filters_to_active_view()
 
     def _refresh_start_time_filters(self) -> None:
         selected_day = str(self.start_times_day_filter.currentText() or "All days")
@@ -556,11 +558,62 @@ class MainWindow(QMainWindow):
 
     def _on_start_time_filter_changed(self) -> None:
         self._apply_start_time_filters_to_tree()
+        self._apply_start_time_filters_to_active_view()
 
     def _reset_start_time_filters(self) -> None:
         self.start_times_day_filter.setCurrentIndex(0)
         self.start_times_class_filter.setCurrentIndex(0)
         self._apply_start_time_filters_to_tree()
+        self._apply_start_time_filters_to_active_view()
+
+    def _apply_start_time_filters_to_active_view(self) -> None:
+        all_items = list(self._start_time_flights_all or [])
+        if not all_items:
+            return
+
+        selected_day = str(self.start_times_day_filter.currentText() or "All days")
+        selected_class = str(self.start_times_class_filter.currentText() or "All classes")
+
+        filtered_paths: list[str] = []
+        for item in all_items:
+            file_path = str(item.get("file_path") or "")
+            item_day = str(item.get("day") or "Unsorted")
+            item_class = str(item.get("class_name") or "Flights")
+            if (item_day == "Unsorted" or item_class == "Flights") and file_path:
+                inferred = infer_contest_class_day_from_path(file_path)
+                item_day = str(inferred.get("day") or item_day)
+                item_class = str(inferred.get("class_name") or item_class)
+            if selected_day != "All days" and item_day != selected_day:
+                continue
+            if selected_class != "All classes" and item_class != selected_class:
+                continue
+            if file_path:
+                filtered_paths.append(file_path)
+
+        if not filtered_paths:
+            self.status_controller.set_text("Status: no active flights match selected day/class filters")
+            return
+
+        filtered_flights: list = []
+        for file_path in filtered_paths:
+            record = self.flight_load_controller.cached_record(file_path)
+            if record is None:
+                continue
+            if not bool(getattr(record, "valid", False)) or getattr(record, "flight", None) is None:
+                continue
+            filtered_flights.append(record)
+
+        if not filtered_flights:
+            self.status_controller.set_text("Status: filtered flights are not cached yet")
+            return
+
+        current_paths = [str(getattr(item, "file_path", "")) for item in self.scene_state.active_flights]
+        filtered_paths = [str(getattr(item, "file_path", "")) for item in filtered_flights]
+        if current_paths == filtered_paths:
+            return
+
+        self.selected_file_label.setText(selected_files_label(filtered_paths))
+        self.render_static_track(filtered_paths[0], active_records=filtered_flights)
 
     def _cache_or_load_flight_record(self, file_path: str):
         """Delegate parsing and caching to the flight loader service."""

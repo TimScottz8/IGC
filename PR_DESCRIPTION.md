@@ -36,6 +36,10 @@ This change set shifts the app from single-day/single-flight behavior toward com
   - most specific selected nodes now win
   - day selection no longer expands to entire competition when ancestor is also selected
   - applied for both local contest tree and viewer start-time tree
+- Fixed viewer active-scope override bug:
+  - bulk load no longer re-renders full loaded set after filters are applied
+  - changing day/class filters now updates active map scope immediately
+  - reset filters restores full loaded scope
 
 ### 5. CPU-first performance improvements
 - Load path:
@@ -54,6 +58,7 @@ This change set shifts the app from single-day/single-flight behavior toward com
 
 ## Notes
 - Full Qt-heavy suite can intermittently SIGSEGV in this environment; focused tests are used for reliable iterative verification.
+- CPU usage while opening can appear low when most requested flights are cache hits; multi-core parse is primarily exercised on larger uncached selections.
 
 ## Follow-up
 1. Add status diagnostics for load operations (selected count, cache hits/misses, parse time).

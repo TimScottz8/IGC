@@ -484,6 +484,31 @@ class SectorGeometryTests(unittest.TestCase):
         window.close()
         app.quit()
 
+    def test_main_window_filter_updates_active_flight_scope_and_reset_restores(self):
+        app = QApplication.instance() or QApplication([])
+        window = MainWindow()
+        file_paths = [
+            "igc_downloads/open-standard-15m-nationals-2026-husbands-bosworth-2026/15 Metre/2026-08-08/688_10.igc",
+            "igc_downloads/open-standard-15m-nationals-2026-husbands-bosworth-2026/15 Metre/2026-08-09/689_10.igc",
+        ]
+
+        window.open_igc_files(file_paths)
+        process_events_until(lambda: len(window.scene_state.active_flights) == 2)
+
+        window.start_times_day_filter.setCurrentText("2026-08-08")
+        window.start_times_class_filter.setCurrentText("15 Metre")
+        process_events_until(lambda: len(window.scene_state.active_flights) == 1)
+
+        self.assertEqual(len(window.scene_state.active_flights), 1)
+        self.assertIn("2026-08-08", window.scene_state.active_flights[0].file_path)
+
+        window._reset_start_time_filters()
+        process_events_until(lambda: len(window.scene_state.active_flights) == 2)
+        self.assertEqual(len(window.scene_state.active_flights), 2)
+
+        window.close()
+        app.quit()
+
     def test_main_window_preserves_playback_time_when_reselecting_flights(self):
         app = QApplication.instance() or QApplication([])
         window = MainWindow()
