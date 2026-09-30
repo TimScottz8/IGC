@@ -7,6 +7,7 @@ from urllib.parse import urlparse
 from PySide6.QtCore import QObject, QThread, Qt, Signal
 from PySide6.QtWidgets import QMessageBox, QTableWidgetItem, QTreeWidgetItem
 
+from contest_service import contest_download_dir, process_download_selection
 from download_helpers import DOWNLOAD_DIR, sanitize
 from qt_helpers import (
     build_contest_download_plan,
@@ -14,7 +15,6 @@ from qt_helpers import (
     build_local_contest_tree_items,
     contest_name_from_url,
     create_session,
-    download_single_candidate,
     iter_downloaded_igc_paths,
     selected_download_plan_items,
     selected_local_flight_paths,
@@ -60,8 +60,7 @@ class ContestDownloadWorker(QObject):
     def run(self) -> None:
         try:
             session = create_session()
-            base_dir = os.path.join(DOWNLOAD_DIR, sanitize(self.contest_name or "contest"))
-            os.makedirs(base_dir, exist_ok=True)
+            base_dir = contest_download_dir(self.contest_name or "contest")
 
             lines: list[str] = []
             total = len(self.selection)
@@ -69,37 +68,29 @@ class ContestDownloadWorker(QObject):
                 self.finished.emit(lines, base_dir, total, False, len(lines))
                 return
 
-            workers = 1
+            results = process_download_selection(
+                session,
+                self.contest_url,
+                self.selection,
+                base_dir=base_dir,
+                cancel_callback=lambda: self._cancel_requested,
+            )
 
-            def worker_task(index: int, item: dict[str, str]):
-                if self._cancel_requested:
-                    return index, item, {"link": item["link"], "status": "cancelled", "path": None, "retries": 0, "elapsed_seconds": 0.0}
-                out_dir = os.path.join(base_dir, sanitize(str(item["class_name"])), sanitize(str(item["day"])))
-                os.makedirs(out_dir, exist_ok=True)
-                result = download_single_candidate(session, self.contest_url, item["link"], out_dir)
-                return index, item, result
-
-            with ThreadPoolExecutor(max_workers=workers) as pool:
-                future_map = {
-                    pool.submit(worker_task, index, item): item
-                    for index, item in enumerate(self.selection, start=1)
-                }
-                for future in as_completed(future_map):
-                    if self._cancel_requested:
-                        break
-                    index, item, result = future.result()
-                    if result["status"] == "ok":
-                        line = f"{index}/{total} OK {result['path']}"
-                        status_text = "OK"
-                    else:
-                        line = f"{index}/{total} {result['status']}"
-                        status_text = str(result["status"]).upper()
-                    lines.append(line)
-                    link_path = str(item["link"]).split("?", 1)[0].rstrip("/")
-                    label = os.path.basename(link_path) or link_path
-                    retry_count = int(result.get("retries", 0) or 0)
-                    elapsed = float(result.get("elapsed_seconds", 0.0) or 0.0)
-                    self.progress.emit(index, total, label, status_text, retry_count, elapsed)
+            for result in results:
+                index = int(result["index"])
+                item = next(item for item in self.selection if item.get("link") == result.get("link")) if result.get("link") else {"link": ""}
+                if result["status"] == "ok":
+                    line = f"{index}/{total} OK {result['path']}"
+                    status_text = "OK"
+                else:
+                    line = f"{index}/{total} {result['status']}"
+                    status_text = str(result["status"]).upper()
+                lines.append(line)
+                link_path = str(item.get("link") or result.get("link") or "").split("?", 1)[0].rstrip("/")
+                label = os.path.basename(link_path) or link_path
+                retry_count = int(result.get("retries", 0) or 0)
+                elapsed = float(result.get("elapsed_seconds", 0.0) or 0.0)
+                self.progress.emit(index, total, label, status_text, retry_count, elapsed)
 
             if self._cancel_requested:
                 self.finished.emit(lines, base_dir, total, True, len(lines))

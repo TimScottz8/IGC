@@ -130,3 +130,25 @@ def test_host_cooldown_blocks_throttled_requests():
 
     assert remaining > 0.0
     assert remaining <= 30.0
+
+
+def test_download_service_turns_selection_into_queue_results(tmp_path):
+    from contest_service import process_download_selection
+
+    selection = [
+        {"class_name": "15 Metre", "day": "2026-08-08", "link": "https://example.com/file.igc"},
+        {"class_name": "15 Metre", "day": "2026-08-09", "link": "https://example.com/file2.igc"},
+    ]
+
+    session = FakeSession()
+    results = process_download_selection(
+        session,
+        "https://example.com/contest",
+        selection,
+        base_dir=str(tmp_path),
+        cancel_callback=lambda: False,
+    )
+
+    assert len(results) == 2
+    assert {item["status"] for item in results} == {"ok"}
+    assert all(item["path"] is not None for item in results)
