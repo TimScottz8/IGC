@@ -17,6 +17,9 @@ The current codebase is a Qt desktop app that provides the working foundation fo
 
 Implemented and currently working:
 - contest discovery and download planning from SoaringSpot
+- filtering out false-positive non-flight links and generic `/downloads` pages
+- live per-file download queue with status, retry, and elapsed-time reporting
+- conservative host-cooldown handling to avoid hitting SoaringSpot throttling too aggressively
 - grouping downloaded flights by contest, class, and day
 - opening one or more IGC files from local or downloaded sources
 - caching parsed flight records and loading multiple files together
@@ -27,9 +30,10 @@ Implemented and currently working:
 - preserving the current playback timestamp while changing selection state
 - thermal-only gaggle detection as the current first-pass analysis layer
 
-This is now a working multi-flight analysis workflow at the first useful product stage, not just a single-flight viewer.
+This is now a working multi-flight analysis workflow at the first useful product stage, with the next step being a serial overnight contest queue for loading many contests without manually babysitting the app.
 
 Not yet delivered:
+- a persistent multi-contest queue with resume support
 - a polished cluster dashboard and summary table
 - stronger gaggles-on-map overlays with clearer human-readable presentation
 - full start-time metrics correlation per gaggle event

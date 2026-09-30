@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urlparse
 
 from PySide6.QtCore import QObject, QThread, Qt, Signal
-from PySide6.QtWidgets import QMessageBox, QTreeWidgetItem
+from PySide6.QtWidgets import QMessageBox, QTableWidgetItem, QTreeWidgetItem
 
 from download_helpers import DOWNLOAD_DIR, sanitize
 from qt_helpers import (
@@ -42,7 +43,7 @@ class ContestDiscoveryWorker(QObject):
 
 
 class ContestDownloadWorker(QObject):
-    progress = Signal(int, int, str)
+    progress = Signal(int, int, str, str, int, float)
     finished = Signal(object, str, int, bool, int)
     failed = Signal(str)
 
@@ -64,21 +65,45 @@ class ContestDownloadWorker(QObject):
 
             lines: list[str] = []
             total = len(self.selection)
-            for index, item in enumerate(self.selection, start=1):
+            if total == 0:
+                self.finished.emit(lines, base_dir, total, False, len(lines))
+                return
+
+            workers = 1
+
+            def worker_task(index: int, item: dict[str, str]):
                 if self._cancel_requested:
-                    self.finished.emit(lines, base_dir, total, True, len(lines))
-                    return
+                    return index, item, {"link": item["link"], "status": "cancelled", "path": None, "retries": 0, "elapsed_seconds": 0.0}
                 out_dir = os.path.join(base_dir, sanitize(str(item["class_name"])), sanitize(str(item["day"])))
                 os.makedirs(out_dir, exist_ok=True)
                 result = download_single_candidate(session, self.contest_url, item["link"], out_dir)
-                if result["status"] == "ok":
-                    line = f"{index}/{total} OK {result['path']}"
-                else:
-                    line = f"{index}/{total} {result['status']}"
-                lines.append(line)
-                link_path = str(item["link"]).split("?", 1)[0].rstrip("/")
-                label = os.path.basename(link_path) or link_path
-                self.progress.emit(index, total, label)
+                return index, item, result
+
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                future_map = {
+                    pool.submit(worker_task, index, item): item
+                    for index, item in enumerate(self.selection, start=1)
+                }
+                for future in as_completed(future_map):
+                    if self._cancel_requested:
+                        break
+                    index, item, result = future.result()
+                    if result["status"] == "ok":
+                        line = f"{index}/{total} OK {result['path']}"
+                        status_text = "OK"
+                    else:
+                        line = f"{index}/{total} {result['status']}"
+                        status_text = str(result["status"]).upper()
+                    lines.append(line)
+                    link_path = str(item["link"]).split("?", 1)[0].rstrip("/")
+                    label = os.path.basename(link_path) or link_path
+                    retry_count = int(result.get("retries", 0) or 0)
+                    elapsed = float(result.get("elapsed_seconds", 0.0) or 0.0)
+                    self.progress.emit(index, total, label, status_text, retry_count, elapsed)
+
+            if self._cancel_requested:
+                self.finished.emit(lines, base_dir, total, True, len(lines))
+                return
 
             self.finished.emit(lines, base_dir, total, False, len(lines))
         except Exception as exc:
@@ -260,6 +285,11 @@ class DownloadController(QObject):
 
         total = len(selection)
         self._cancel_requested = False
+        self.window.download_log.clear()
+        self.window.download_log.setVisible(True)
+        self.window.download_log.appendPlainText(f"Starting download: {total} file(s)")
+        self.window.download_queue.setVisible(True)
+        self.window.download_queue.setRowCount(0)
         self.window.discover_contest_button.setEnabled(False)
         self.window.set_download_busy(True, allow_cancel=True)
         self.window.status_controller.start_download_progress(total)
@@ -280,10 +310,21 @@ class DownloadController(QObject):
         self._download_worker = worker
         thread.start()
 
-    def _on_download_progress(self, index: int, total: int, line: str) -> None:
+    def _on_download_progress(self, index: int, total: int, line: str, status: str, retries: int, elapsed_seconds: float) -> None:
         if self._shutting_down:
             return
         self.window.status_controller.update_download_progress(index, total, line)
+        self.window.download_log.setVisible(True)
+        self.window.download_log.appendPlainText(f"{index}/{total} {line} | status={status} | retries={retries} | time={elapsed_seconds:.1f}s")
+
+        row = self.window.download_queue.rowCount()
+        self.window.download_queue.insertRow(row)
+        self.window.download_queue.setItem(row, 0, QTableWidgetItem(line))
+        self.window.download_queue.setItem(row, 1, QTableWidgetItem(status))
+        self.window.download_queue.setItem(row, 2, QTableWidgetItem(str(retries)))
+        self.window.download_queue.setItem(row, 3, QTableWidgetItem(f"{elapsed_seconds:.1f}s"))
+        self.window.download_queue.setVisible(True)
+        self.window.download_queue.scrollToBottom()
 
     def _on_download_finished(self, lines: list[str], base_dir: str, total: int, cancelled: bool, completed: int) -> None:
         if self._shutting_down:

@@ -1,5 +1,6 @@
 import os
 import re
+import threading
 import time
 from html import unescape
 from urllib.parse import urljoin, urlparse, parse_qsl, urlencode, urlunparse
@@ -8,8 +9,63 @@ import requests
 from bs4 import BeautifulSoup
 
 DOWNLOAD_DIR = "igc_downloads"
-USER_AGENT = "Mozilla/5.0"
+USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 DOWNLOAD_ACCEPT = "application/vnd.flight+igc,application/octet-stream,*/*"
+THROTTLE_STATUS_CODES = {429, 500, 502, 503, 504}
+HOST_COOLDOWNS: dict[str, float] = {}
+HOST_COOLDOWNS_LOCK = threading.Lock()
+
+
+def get_host_cooldown_remaining(url: str) -> float:
+    host = (urlparse(url).netloc or urlparse(url).hostname or "").lower()
+    if not host:
+        return 0.0
+    with HOST_COOLDOWNS_LOCK:
+        until = HOST_COOLDOWNS.get(host, 0.0)
+        if until <= time.monotonic():
+            HOST_COOLDOWNS.pop(host, None)
+            return 0.0
+        return max(0.0, until - time.monotonic())
+
+
+def register_host_cooldown(url: str, cooldown_seconds: float = 45.0) -> float:
+    """Pause a host after a rate-limit or server-throttle response."""
+    host = (urlparse(url).netloc or urlparse(url).hostname or "").lower()
+    if not host:
+        return 0.0
+    with HOST_COOLDOWNS_LOCK:
+        until = max(HOST_COOLDOWNS.get(host, 0.0), time.monotonic() + float(cooldown_seconds))
+        HOST_COOLDOWNS[host] = until
+        return max(0.0, until - time.monotonic())
+
+
+def wait_for_host_cooldown(url: str) -> float:
+    remaining = get_host_cooldown_remaining(url)
+    if remaining > 0:
+        time.sleep(remaining)
+    return remaining
+
+
+def browser_headers(source_url: str | None = None, extra: dict | None = None) -> dict:
+    """Return browser-like headers suitable for SoaringSpot downloads."""
+    headers = {
+        "User-Agent": USER_AGENT,
+        "Accept": DOWNLOAD_ACCEPT,
+        "Accept-Language": "en-GB,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+        "Upgrade-Insecure-Requests": "1",
+        "Sec-Fetch-Site": "same-origin",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-User": "?1",
+        "DNT": "1",
+    }
+    if source_url:
+        headers["Referer"] = source_url
+    if extra:
+        headers.update(extra)
+    return headers
 
 # SoaringSpot exposes contest pages and task/result links as ordinary HTML.
 # We crawl those links, normalise them, and only keep the direct download endpoints
@@ -36,6 +92,38 @@ def save_stream(r, out_dir):
             if chunk:
                 fh.write(chunk)
     return path
+
+
+def is_probably_igc_download_url(url: str) -> bool:
+    """Only accept direct IGC payload URLs and reject flight-page stubs that are not actual files."""
+    if not url:
+        return False
+    lower = str(url).strip().lower()
+    if not lower or lower.startswith(('javascript:', 'mailto:')):
+        return False
+    if '/downloads' in lower or '/downloads?' in lower:
+        return False
+    if lower.endswith('.igc'):
+        return True
+    if '.igc' in lower and ('download' in lower or 'flight' in lower or 'archive.soaringspot.com' in lower):
+        return True
+    return False
+
+
+def direct_candidate_links(html_text: str, base: str):
+    """Prefer obvious direct flight URLs before crawling deeper contest pages."""
+    soup = BeautifulSoup(html_text, 'html.parser')
+    candidate_links: list[str] = []
+    seen = set()
+    for a in soup.find_all('a', href=True):
+        href = (a.get('href') or '').strip()
+        if not href:
+            continue
+        url = href if href.startswith('http') else urljoin(base, href)
+        if is_probably_igc_download_url(url) and url not in seen:
+            seen.add(url)
+            candidate_links.append(url)
+    return candidate_links
 
 
 def fetch_url_for_download(link: str) -> str:
@@ -77,6 +165,27 @@ def canonical_url(u):
     q.pop('dl', None)
     query = urlencode(sorted(q.items())) if q else ''
     return urlunparse((p.scheme, p.netloc, p.path, p.params, query, p.fragment))
+
+
+def build_session_headers(source_url: str | None = None, extra: dict | None = None) -> dict:
+    """Return a fuller browser-like session header set."""
+    headers = {
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-GB,en;q=0.9',
+        'Cache-Control': 'no-cache',
+        'Pragma': 'no-cache',
+        'Upgrade-Insecure-Requests': '1',
+        'DNT': '1',
+        'Connection': 'keep-alive',
+        'Sec-Fetch-Dest': 'document',
+        'Sec-Fetch-Mode': 'navigate',
+        'Sec-Fetch-Site': 'same-origin',
+    }
+    if source_url:
+        headers['Referer'] = source_url
+    if extra:
+        headers.update(extra)
+    return headers
 
 
 def dedupe_contest_links(all_links):
@@ -289,9 +398,9 @@ def find_candidates(html, base):
             return
         decoded = unescape(str(raw)).strip()
         for m in re.findall(r'https?://[^\s\"\']+|/[^\s\"\']+', decoded):
-            lower = m.lower()
-            if lower.endswith('.igc') or 'download-contest-flight' in lower or 'download-flight' in lower or '/download/' in lower:
-                candidates.add(m if m.startswith('http') else urljoin(base, m))
+            url = m if m.startswith('http') else urljoin(base, m)
+            if is_probably_igc_download_url(url):
+                candidates.add(url)
 
     for a in s.find_all("a", href=True):
         href = a["href"].strip()

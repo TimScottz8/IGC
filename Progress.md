@@ -3,6 +3,7 @@
 Canonical overview:
 - `README.md` describes the current project scope
 - `Pathway.md` describes the long-term analysis direction
+- `resume.md` is the handoff guide for the next working session
 
 ## Update 2026-09-15
 
@@ -65,65 +66,55 @@ Canonical overview:
 3. wire UI action from Analysis setup to produce day-summary and competition-summary outputs using the contract pipeline
 
 ## Current checkpoint
-The viewer is now beyond the initial multi-flight baseline and has an actively evolving thermal gaggle analysis workflow.
+The project is now a working multi-flight desktop viewer and analysis-oriented workflow with a stable contest discovery path, a direct IGC download pipeline, a live per-file queue, and a host-cooldown strategy to reduce SoaringSpot throttling. The app remains analysis-first: the immediate focus is not just file loading but multi-contest interpretation and gaggle behaviour across datasets.
 
-The core product direction is unchanged: this is an analysis-first Qt desktop application for studying contest behaviour, gaggle formation, and start-time relationships. The recent work concentrated on making gaggle detection visible enough to iterate on in the viewer, while keeping the playback workflow stable.
+The key technical result from this session is that we have moved beyond the earlier false-candidate bug and can now distinguish genuine IGC flight payloads from generic SoaringSpot download pages and internal route stubs. The remaining live-server issue is not a logic crash but the host’s own request throttling.
 
 ## Completed in this session block
-- preserved full flight-path display while static, with snail-trail rendering only during active animation
-- added inline gaggle settings in the Flight viewer for distance, time window, minimum cluster size, and vertical separation
-- added persistent gaggle reference zones for static inspection and current-time-only gaggle overlays during animation
-- moved gaggle detection off the UI thread and added visible progress/cancel controls for heavy day-level processing
-- enabled a multiprocessing clustering path to use multiple CPU cores, with serial fallback when process-pool startup is unsuitable
-- fixed a critical data issue where altitude fields were lost during parser-service serialization, which previously caused zero detected gaggle zones
-- aligned gaggle event timestamps to the same relative-seconds timeline used by playback, which is necessary for animated detection to line up with the map
-- introduced drift-aware gaggle-zone merging so one drifting thermal does not explode into many separate reference zones
-- limited overlay draw load to avoid UI hangs after detection completes
-- corrected gaggle visual size to use unique-flight count instead of raw event count
+- fixed the SoaringSpot false-positive bug that treated `/downloads` and `download-contest-flight/3377-*` URLs as real flight files
+- added a live per-file download queue to the Download tab so progress is visible at the file level
+- added retry count and elapsed time tracking for each file in the download queue
+- reduced the download worker to a conservative single-thread mode for SoaringSpot to avoid triggering burst throttling
+- implemented a host cooldown mechanism that pauses requests after 429/5xx throttle responses
+- verified live discovery against the real contest URL and confirmed the false URL types are no longer generated
+- updated regression tests to cover the false-positive filter and host cooldown behaviour
 
 ## Current behaviour
 The app can now:
-- discover and download contest flights
-- open multiple gliders together
-- dynamically select and deselect gliders without resetting time
-- show full routes when paused or static, and snail trails while animating
-- compute thermal gaggle candidates with horizontal, temporal, and vertical separation filters
-- show whole-flight reference zones while static
-- show only current or recent gaggle overlays while animating, instead of the entire flight's zones
-- keep gaggle circles visible for a persistence window after departure so formation can be followed in playback
+- discover and download contest flights from SoaringSpot without collecting obvious false candidates
+- ignore generic contest `/downloads` pages and non-flight route stubs
+- display live file-level status in a queue table while downloads are running
+- detect host throttling and cool down for a short period instead of continuing aggressive bursts
+- maintain a stable Qt import path and pass the relevant contest discovery regression tests
 
 ## Important implementation notes
-- `flight_model.py` now preserves `alt`, `gnss_alt`, and `press_alt` when records move through the parser-service path
-- `gaggle_analysis.py` is currently the main performance-sensitive module; it now contains:
-- clearer thermal threshold constants
-- relative-time event generation
-- fast horizontal prefiltering before geodesic distance checks
-- multiprocessing chunk execution with a safe fallback path
-- `qt_app.py` now owns substantial gaggle UI state, including settings, progress UI, static reference rendering, active animation overlays, and drift-zone merging
+- `download_helpers.py` now contains the main false-positive filtering and host-cooldown logic
+- `qt_helpers.py` now records per-request retry and timing info and waits for host cooldown before issuing the next request
+- `qt_controllers.py` now runs contest downloads with a conservative single-worker policy for SoaringSpot downloads
+- `qt_app.py` shows a per-file queue table so the user can see exactly what is being processed and whether a request is throttled or retried
+- `test_contest_dataset.py` is now the regression suite covering the false-candidate issue, real SoaringSpot discovery, and cooldown behaviour
 
 ## Current limitations and known issues
-- animated gaggle visualization is improved but still needs more field validation; the latest issue under active refinement has been making active circles appear consistently and with sensible persistence
-- drift merging is heuristic and likely needs exposure of its parameters in the UI once the baseline behaviour feels trustworthy
-- there is now a lot of gaggle-specific logic in `qt_app.py`; a future cleanup should move this into a dedicated controller/service layer once behaviour stabilizes
-- `pytest` is not currently available in the repo venv on this machine, so test verification has been limited to compile checks and live application validation
+- SoaringSpot still appears to impose host-level request throttling on bulk direct-download access; the app now treats that as a first-class host constraint rather than a logic defect
+- a single-worker policy is safer than aggressive concurrency, but it can still be slow when many files are queued for one contest
+- a proper overnight queue manager is still the next product-level step so the app can keep fetching a backlog without the user needing to babysit the process
+- future work should likely keep the queue serialised per contest to respect the host's request budget
 
 ## Verified status
 Verified commands in the local venv:
-- `.venv/bin/python -m py_compile flight_model.py gaggle_analysis.py qt_app.py qt_viewer.py test_gaggle_analysis.py`
+- `.venv/bin/python -m pytest -q test_contest_dataset.py`
+- `QT_QPA_PLATFORM=offscreen .venv/bin/python -X faulthandler - <<'PY' ... import qt_app ... PY`
 
-Observed constraints:
-- `.venv/bin/python -m pytest -q test_gaggle_analysis.py` currently fails because `pytest` is not installed in the local `.venv`
-
-Additional direct checks already performed during this session:
-- real downloaded IGC files now load with altitude present in the parsed fixes
-- real-data gaggle clustering returns non-zero clusters with practical thresholds once altitude serialization is preserved
+Fresh result:
+- import succeeded
+- 7 regression tests passed
 
 ## Best next steps
-1. verify animated current-gaggle circles visually on a known day dataset and tune persistence or active-window logic only after that behaviour is confirmed
-2. expose drift-merge parameters in the UI if one thermal still becomes several zones under contest-day conditions
-3. move gaggle rendering/detection orchestration out of `qt_app.py` into a dedicated controller once the interaction model stops changing every session
-4. install `pytest` in the repo-local `.venv` and restore executable regression validation for the gaggle pipeline
-5. start computing per-flight gaggle summaries once the overlay semantics are visually trustworthy
+1. add a queue of contest URLs that downloads sequentially overnight, one contest at a time
+2. persist the queue to disk so it survives app restarts
+3. add a “run all queued contests” button and a pause/resume status
+4. once the queue is in place, add a richer contest-summary view for multi-year and multi-contest comparisons
+5. keep the download strategy conservative so we do not upset the host or trigger temporary blocks
 
 ## Restart prompt for next time
-Resume from `resume.md` and continue tightening the thermal gaggle animation workflow, especially current-time overlay behaviour, drift merging, and the transition from map-only cues to per-flight metrics.
+Resume from `resume.md` and continue with the overnight contest queue and bulk dataset workflow, keeping the SoaringSpot host cooldown and conservative serial download policy as the core safety constraint.

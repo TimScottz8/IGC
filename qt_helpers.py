@@ -7,6 +7,7 @@ and formatting logic remains easy to test and reuse.
 from __future__ import annotations
 
 import os
+import time
 from urllib.parse import urlparse
 
 import requests
@@ -17,7 +18,10 @@ from download_helpers import (
     DOWNLOAD_ACCEPT,
     DOWNLOAD_DIR,
     USER_AGENT,
+    browser_headers,
+    build_session_headers,
     canonical_url,
+    direct_candidate_links,
     discover_class_pages,
     extract_daily_links_from_class_html,
     extract_day_from_page,
@@ -25,9 +29,11 @@ from download_helpers import (
     fetch_url_for_download,
     find_candidates,
     is_download_response_ok,
+    register_host_cooldown,
     save_stream,
     sanitize,
     status_label,
+    wait_for_host_cooldown,
 )
 from geo_task import format_human_readable_datetime
 
@@ -35,8 +41,18 @@ from geo_task import format_human_readable_datetime
 def create_session() -> requests.Session:
     """Return a configured requests session for SoaringSpot downloads."""
     session = requests.Session()
-    session.headers.update({"User-Agent": USER_AGENT})
+    session.headers.update(browser_headers())
+    session.headers.update({"Connection": "keep-alive"})
     return session
+
+
+def request_with_diagnostics(session: requests.Session, url: str, *, headers: dict | None = None, timeout: int = 45):
+    """Helper for live timing diagnostics when debugging slow contest pages."""
+    start = time.monotonic()
+    response = session.get(url, timeout=timeout, headers=headers or {})
+    elapsed = time.monotonic() - start
+    response._timing_seconds = elapsed
+    return response
 
 
 def contest_name_from_url(contest_url: str) -> str:
@@ -74,7 +90,6 @@ def build_contest_download_plan(
     """Flatten discovered contest classes and days into direct IGC download candidates."""
     session = session or create_session()
     base_url = base or f"{urlparse(contest_url).scheme}://{urlparse(contest_url).netloc}"
-    discovered = discover_class_pages(contest_html, contest_url, base_url, session)
     plan: list[dict[str, str]] = []
     seen_links: set[tuple[str, str, str]] = set()
 
@@ -87,6 +102,12 @@ def build_contest_download_plan(
             return
         seen_links.add(key)
         plan.append({"class_name": class_name, "day": day, "link": canonical_link})
+
+    direct_links = direct_candidate_links(contest_html, base_url)
+    for link in direct_links:
+        record("contest", "all", link)
+
+    discovered = discover_class_pages(contest_html, contest_url, base_url, session)
 
     soup = BeautifulSoup(contest_html, "html.parser")
     anchor_hrefs: list[str] = []
@@ -150,19 +171,61 @@ def download_single_candidate(
     source_url: str,
     link: str,
     destination_dir: str = DOWNLOAD_DIR,
+    *,
+    max_retries: int = 3,
+    timeout: int = 45,
 ) -> dict[str, str | None]:
-    """Download one candidate URL and return a structured result for the UI."""
+    """Download one candidate URL with retries and browser-like headers."""
     fetch = fetch_url_for_download(link)
-    headers = session.headers.copy()
-    headers.update({"Referer": source_url, "Accept": DOWNLOAD_ACCEPT})
-    try:
-        response = session.get(fetch, timeout=30, stream=True, headers=headers)
-        if is_download_response_ok(response, fetch):
-            path = save_stream(response, destination_dir)
-            return {"link": link, "status": "ok", "path": path}
-        return {"link": link, "status": status_label(response), "path": None}
-    except Exception as exc:
-        return {"link": link, "status": f"err {exc}", "path": None}
+    start = time.monotonic()
+    for attempt in range(max_retries + 1):
+        wait_for_host_cooldown(fetch)
+        headers = browser_headers(source_url, extra={"Accept": DOWNLOAD_ACCEPT})
+        headers.update(session.headers.copy())
+        try:
+            response = session.get(fetch, timeout=timeout, stream=True, headers=headers)
+            if response.status_code in {429, 500, 502, 503, 504}:
+                register_host_cooldown(fetch, cooldown_seconds=45.0)
+                if attempt < max_retries:
+                    time.sleep(1.0 * (2 ** attempt))
+                    continue
+            if is_download_response_ok(response, fetch):
+                path = save_stream(response, destination_dir)
+                return {
+                    "link": link,
+                    "status": "ok",
+                    "path": path,
+                    "retries": attempt,
+                    "elapsed_seconds": time.monotonic() - start,
+                }
+            if attempt < max_retries:
+                time.sleep(0.5 * (2 ** attempt))
+                continue
+            return {
+                "link": link,
+                "status": status_label(response),
+                "path": None,
+                "retries": attempt,
+                "elapsed_seconds": time.monotonic() - start,
+            }
+        except Exception as exc:
+            if attempt < max_retries:
+                time.sleep(0.75 * (2 ** attempt))
+                continue
+            return {
+                "link": link,
+                "status": f"err {exc}",
+                "path": None,
+                "retries": attempt,
+                "elapsed_seconds": time.monotonic() - start,
+            }
+    return {
+        "link": link,
+        "status": "err retry exhausted",
+        "path": None,
+        "retries": max_retries,
+        "elapsed_seconds": time.monotonic() - start,
+    }
 
 
 def build_start_time_entries(flights: list[dict[str, str]]) -> list[str]:

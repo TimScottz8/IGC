@@ -4,6 +4,12 @@ import os
 import sys
 import time
 
+if not os.environ.get("QT_QPA_PLATFORM"):
+    if os.environ.get("DISPLAY"):
+        os.environ["QT_QPA_PLATFORM"] = "xcb"
+    else:
+        os.environ["QT_QPA_PLATFORM"] = "offscreen"
+
 import pyqtgraph as pg
 from pyproj import CRS, Transformer
 from PySide6.QtCore import QObject, QThread, QTimer, Qt, Signal
@@ -16,13 +22,17 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
     QLabel,
+    QHeaderView,
     QLineEdit,
     QMainWindow,
+    QPlainTextEdit,
     QProgressBar,
     QPushButton,
     QSlider,
     QSpinBox,
     QTabWidget,
+    QTableWidget,
+    QTableWidgetItem,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -204,6 +214,28 @@ class MainWindow(QMainWindow):
         self.download_progress.setValue(0)
         self.download_progress.setVisible(False)
         download_layout.addWidget(self.download_progress)
+
+        self.download_queue = QTableWidget(0, 4)
+        self.download_queue.setHorizontalHeaderLabels(["File", "Status", "Retries", "Time"])
+        self.download_queue.verticalHeader().setVisible(False)
+        self.download_queue.setAlternatingRowColors(True)
+        self.download_queue.setSelectionBehavior(self.download_queue.SelectionBehavior.SelectRows)
+        self.download_queue.setSelectionMode(self.download_queue.SelectionMode.SingleSelection)
+        self.download_queue.setMinimumHeight(180)
+        self.download_queue.setVisible(False)
+        header = self.download_queue.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        download_layout.addWidget(self.download_queue)
+
+        self.download_log = QPlainTextEdit()
+        self.download_log.setReadOnly(True)
+        self.download_log.setPlaceholderText("Download activity will appear here...")
+        self.download_log.setMaximumHeight(140)
+        self.download_log.setVisible(False)
+        download_layout.addWidget(self.download_log)
 
         self.contest_results = QTreeWidget()
         self.contest_results.setHeaderHidden(True)
