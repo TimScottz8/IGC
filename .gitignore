@@ -1,0 +1,15 @@
+# Python cache
+__pycache__/
+*.pyc
+
+# Virtual environments
+.venv/
+venv/
+
+# Download output
+igc_downloads/
+
+# OS/editor files
+.DS_Store
+.vscode/
+.idea/
