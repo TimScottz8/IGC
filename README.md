@@ -17,6 +17,7 @@ The current codebase is a Qt desktop app that provides the working foundation fo
 
 Implemented and currently working:
 - contest discovery and download planning from SoaringSpot
+- persistent multi-contest acquisition queue with serial processing, pause-after-contest, and restart recovery
 - filtering out false-positive non-flight links and generic `/downloads` pages
 - live per-file download queue with status, retry, and elapsed-time reporting
 - conservative host-cooldown handling to avoid hitting SoaringSpot throttling too aggressively
@@ -28,12 +29,14 @@ Implemented and currently working:
 - selecting multiple flights dynamically and showing each selected glider as a distinct active view
 - rendering recent multi-flight trails instead of a single full-route trace
 - preserving the current playback timestamp while changing selection state
+- synchronizing multi-flight playback and gaggle events on absolute IGC UTC timestamps
+- reusing track, marker, and gaggle graphics during playback for larger cohorts
 - thermal-only gaggle detection as the current first-pass analysis layer
 
-This is now a working multi-flight analysis workflow at the first useful product stage, with the next step being a serial overnight contest queue for loading many contests without manually babysitting the app.
+This is now a working multi-flight analysis workflow with persistent multi-contest acquisition and a shared UTC replay clock. The next step is to derive launch and race-start event times from recorded tracks and task geometry, then connect selected contest/day/class scopes to reproducible summary exports.
 
 Not yet delivered:
-- a persistent multi-contest queue with resume support
+- an end-to-end Analysis action that computes and exports summaries for selected competitions
 - a polished cluster dashboard and summary table
 - stronger gaggles-on-map overlays with clearer human-readable presentation
 - full start-time metrics correlation per gaggle event

@@ -2,6 +2,7 @@ import os
 import threading
 import time
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from PySide6.QtWidgets import QApplication, QTreeWidget
@@ -529,6 +530,186 @@ class SectorGeometryTests(unittest.TestCase):
 
         self.assertEqual(window.current_index, max(1, min(10, len(window.track_time_offsets) - 1)))
         self.assertAlmostEqual(window.sim_elapsed_seconds, window.track_time_offsets[window.current_index], places=6)
+        window.close()
+        app.quit()
+
+    def test_main_window_reuses_render_state_for_fifty_active_flights(self):
+        app = QApplication.instance() or QApplication([])
+        window = MainWindow()
+        records = []
+        for flight_index in range(50):
+            fixes = [
+                SimpleNamespace(
+                    lat=52.0 + flight_index * 0.001 + fix_index * 0.0001,
+                    lon=-1.0 + fix_index * 0.0001,
+                    timestamp=float(fix_index * 10),
+                )
+                for fix_index in range(100)
+            ]
+            records.append(FlightRecord(
+                file_path=f"flight-{flight_index}.igc",
+                flight=object(),
+                fixes=fixes,
+                valid=True,
+            ))
+
+        window._gaggle_clusters_ready = True
+        window.scene_state.set_active_flights(records)
+        with (
+            patch.object(window, "_render_gaggle_reference_zones"),
+            patch.object(TimelineState, "from_flight", wraps=TimelineState.from_flight) as timeline_factory,
+        ):
+            window.flight_render_controller._render_loaded_record(records[0], active_records=records)
+            setup_timeline_calls = timeline_factory.call_count
+            track_items = tuple(window.extra_track_items)
+            marker_item = window.active_flight_marker_item
+
+            self.assertEqual(len(window.active_flight_render_data), 50)
+            self.assertEqual(len(track_items), 49)
+            window.gaggle_clusters_raw = [{
+                "first_timestamp": 0.0,
+                "last_timestamp": 990.0,
+                "timestamp": 0.0,
+                "size": 50,
+                "radius_m": 100.0,
+                "centroid": {"lat": 52.025, "lon": -0.995},
+                "zone_flight_ids": [str(index) for index in range(50)],
+                "members": [
+                    {"flight_id": str(index), "lat": 52.0 + index * 0.001, "lon": -1.0 + index * 0.001}
+                    for index in range(50)
+                ],
+            }]
+            centroid_item = window.gaggle_centroid_item
+            member_item = window.gaggle_member_item
+
+            for frame_index in range(1, 6):
+                window.current_index = frame_index
+                window.sim_elapsed_seconds = window.track_time_offsets[frame_index]
+                window._render_track_view(use_recent_trail=True)
+                window._render_active_gaggles()
+
+            self.assertEqual(timeline_factory.call_count, setup_timeline_calls)
+            self.assertEqual(tuple(window.extra_track_items), track_items)
+            self.assertIs(window.active_flight_marker_item, marker_item)
+            self.assertEqual(len(window.active_flight_marker_item.points()), 50)
+            self.assertIs(window.gaggle_centroid_item, centroid_item)
+            self.assertIs(window.gaggle_member_item, member_item)
+            self.assertEqual(len(centroid_item.points()), 1)
+            self.assertEqual(len(member_item.points()), 50)
+
+        window.close()
+        app.quit()
+
+    def test_animation_waits_until_gaggle_events_are_precomputed(self):
+        app = QApplication.instance() or QApplication([])
+        window = MainWindow()
+        window.track_xs = [0.0, 1.0]
+        window.track_ys = [0.0, 1.0]
+        window.track_time_offsets = [0.0, 1.0]
+        window.track_utc_timestamps = [100.0, 101.0]
+        window.playback_start_utc_s = 100.0
+        window.playback_end_utc_s = 101.0
+        window.scene_state.set_active_flights([object(), object()])
+        window._gaggle_clusters_ready = False
+
+        window.start_animation()
+        self.assertFalse(window.timer.isActive())
+
+        window._gaggle_clusters_ready = True
+        window.start_animation()
+        self.assertTrue(window.timer.isActive())
+        window.timer.stop()
+        window.close()
+        app.quit()
+
+    def test_multi_flight_playback_uses_shared_utc_range_and_staggered_fixes(self):
+        app = QApplication.instance() or QApplication([])
+        window = MainWindow()
+
+        def make_record(name: str, timestamps: list[float], latitude: float) -> FlightRecord:
+            fixes = [
+                SimpleNamespace(
+                    lat=latitude + index * 0.0001,
+                    lon=-1.0 + index * 0.0001,
+                    timestamp=timestamp,
+                )
+                for index, timestamp in enumerate(timestamps)
+            ]
+            return FlightRecord(file_path=name, flight=object(), fixes=fixes, valid=True)
+
+        primary = make_record("primary.igc", [100.0, 110.0, 120.0], 52.0)
+        earlier = make_record("earlier.igc", [90.0, 100.0, 110.0, 120.0, 130.0], 52.1)
+        window._gaggle_clusters_ready = True
+
+        with patch.object(window, "_render_gaggle_reference_zones"):
+            window.flight_render_controller._render_loaded_record(
+                primary,
+                active_records=[primary, earlier],
+            )
+
+        self.assertEqual(window.playback_start_utc_s, 90.0)
+        self.assertEqual(window.playback_end_utc_s, 130.0)
+        self.assertEqual(window._playback_duration_seconds(), 40.0)
+        window._render_track_view(use_recent_trail=True)
+        self.assertEqual(len(window.active_flight_marker_item.points()), 1)
+
+        window.jump_to_time_offset(10.0)
+        self.assertEqual(window.current_utc_time_s, 100.0)
+        self.assertEqual(len(window.active_flight_marker_item.points()), 2)
+
+        window.sim_elapsed_seconds = 31.0
+        window.current_index = len(window.track_xs) - 1
+        window.last_tick_monotonic = time.monotonic() - 1.0
+        window.timer.start()
+        window.on_tick()
+        self.assertTrue(window.timer.isActive())
+        self.assertLess(window.sim_elapsed_seconds, window._playback_duration_seconds())
+        window.timer.stop()
+
+        window.close()
+        app.quit()
+
+    def test_gaggle_circles_follow_cached_event_timestamps_without_recomputing(self):
+        app = QApplication.instance() or QApplication([])
+        window = MainWindow()
+        window.scene_state.set_active_flights([object(), object()])
+        window.track_xs = [0.0, 1.0, 2.0, 3.0]
+        window.track_ys = [0.0, 1.0, 2.0, 3.0]
+        window.track_time_offsets = [0.0, 5.0, 10.0, 21.0]
+        window._configure_projection([-1.0, -0.99], [52.0, 52.01])
+        window._gaggle_clusters_ready = True
+        window.GAGGLE_ACTIVE_PERSISTENCE_S = 10.0
+        window.gaggle_time_delta_s = 5.0
+        window.gaggle_clusters_raw = [{
+            "timestamp": 7.5,
+            "first_timestamp": 5.0,
+            "last_timestamp": 10.0,
+            "size": 2,
+            "radius_m": 100.0,
+            "centroid": {"lat": 52.005, "lon": -0.995},
+            "zone_flight_ids": ["a", "b"],
+            "members": [
+                {"flight_id": "a", "lat": 52.0, "lon": -1.0},
+                {"flight_id": "b", "lat": 52.01, "lon": -0.99},
+            ],
+        }]
+
+        with patch("qt_app.compute_thermal_gaggles") as compute_gaggles:
+            window.current_index = 0
+            window._render_active_gaggles()
+            self.assertEqual(len(window.gaggle_centroid_item.points()), 0)
+
+            window.current_index = 1
+            window._render_active_gaggles()
+            self.assertEqual(len(window.gaggle_centroid_item.points()), 1)
+            self.assertEqual(len(window.gaggle_member_item.points()), 2)
+
+            window.current_index = 3
+            window._render_active_gaggles()
+            self.assertEqual(len(window.gaggle_centroid_item.points()), 0)
+            self.assertEqual(len(window.gaggle_member_item.points()), 0)
+
+        compute_gaggles.assert_not_called()
         window.close()
         app.quit()
 

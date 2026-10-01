@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import math
 
 from flight_model import FlightRecord
@@ -50,6 +50,21 @@ def test_compute_thermal_gaggles_finds_cluster_for_two_circling_flights():
     assert any("members" in cluster for cluster in clusters)
 
 
+def test_compute_thermal_gaggles_keeps_staggered_flights_on_shared_utc_time():
+    record_a = _record("a.igc", 52.1, -1.0)
+    record_b = _record("b.igc", 52.1005, -0.9995)
+    for fix in record_b.fixes:
+        fix.timestamp += 711.0
+
+    clusters = compute_thermal_gaggles(
+        [record_a, record_b],
+        max_distance_m=250.0,
+        max_time_delta_s=12.0,
+    )
+
+    assert not clusters
+
+
 def test_compute_thermal_gaggles_respects_vertical_separation_filter():
     record_a = _record("a.igc", 52.1, -1.0)
     record_b = _record("b.igc", 52.1005, -0.9995)
@@ -68,7 +83,7 @@ def test_compute_thermal_gaggles_respects_vertical_separation_filter():
 
 
 def test_compute_thermal_gaggles_handles_datetime_timestamps():
-    base = datetime(2026, 8, 8, 11, 0, 0)
+    base = datetime(2026, 8, 8, 11, 0, 0, tzinfo=timezone.utc)
     fixes_a: list[FakeFix] = []
     fixes_b: list[FakeFix] = []
     for i in range(12):
@@ -93,6 +108,8 @@ def test_compute_thermal_gaggles_handles_datetime_timestamps():
 
     assert clusters
     assert any(cluster["timestamp"] > 0.0 for cluster in clusters)
+    expected_utc = base.timestamp()
+    assert expected_utc <= clusters[0]["timestamp"] < expected_utc + 60.0
 
 
 def test_lifecycle_keeps_event_across_short_gap_when_still_nearby():

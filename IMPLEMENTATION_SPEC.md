@@ -39,6 +39,22 @@ Time-based graphs comparing competition summaries across years, classes, and cou
 
 Day is the atomic analysis unit. Competition is the default comparison unit for trend graphs.
 
+## IGC Time And Start Semantics
+
+References:
+- [IGC 2008 format reference, sections 2.4, 2.5.4, and 4.1](https://xp-soaring.github.io/igc_file_format/igc_format_2008.html)
+- [FAI/IGC 2023 specification (AL8)](https://xp-soaring.github.io/igc_file_format/igc_fr_specification_with_al8_2023-2-1_0.pdf)
+
+The IGC B-record time is UTC `HHMMSS`. The HFDTE header supplies the UTC date for the first valid B-record fix. Together, these are absolute fix instants; the application must not shift or reinterpret them to align separate flights. Parsed UTC instants may be represented as Unix seconds internally.
+
+Cross-flight analysis and playback use one shared UTC time axis. Gaggle event `timestamp`, `first_timestamp`, and `last_timestamp` values are UTC seconds. Playback spans the earliest through latest UTC fix in the selected cohort, and each flight is sampled at the same UTC cursor. Per-flight elapsed offsets may be derived for duration metrics, but must not replace UTC when correlating separate flights.
+
+Launch and race start are separate derived events:
+- **Launch onset:** the first valid fix whose calculated ground speed exceeds 30 kt (approximately 15.43 m/s). This is an analysis heuristic, not a correction to IGC timestamps.
+- **Race start:** the last exit from the task start zone before the track proceeds to the first turning point. Do not substitute the first recorded fix or launch onset for race start.
+
+Keep all recorded fixes, including pre-launch ground fixes, on their original UTC timeline. Derived launch and race-start timestamps must retain that same UTC basis. If timestamps or task geometry are insufficient to derive an event, mark it unavailable rather than shifting the flight clock.
+
 ## Canonical Gaggle Model
 
 The code should implement a parameterized gaggle event model with a stable contract.

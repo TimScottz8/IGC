@@ -8,7 +8,6 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from bisect import bisect_left, bisect_right
 from math import cos, radians
 
-from flight_fix_utils import build_time_offsets as _build_time_offsets
 from flight_fix_utils import fix_altitude as _fix_altitude
 from flight_fix_utils import fix_timestamp as _fix_timestamp
 from sector_geometry import _bearing_between_points, _distance_between_points_m, _normalize_bearing_deg
@@ -552,17 +551,18 @@ def compute_thermal_gaggles(
         if cancel_check is not None and cancel_check():
             return []
         fixes = list(getattr(record, "fixes", []) or [])
-        offsets = _build_time_offsets(fixes)
         for segment in _cached_detect_thermal_segments(record, fixes):
             for idx in range(segment["start_idx"], segment["end_idx"] + 1):
                 fix = fixes[idx]
                 pos = _fix_position(fix)
                 if pos is None:
                     continue
-                relative_timestamp = offsets[idx] if idx < len(offsets) else float(idx)
+                timestamp = _fix_timestamp(fix)
+                if timestamp is None:
+                    continue
                 thermal_events.append({
                     "flight_id": str(record.file_path),
-                    "timestamp": float(relative_timestamp),
+                    "timestamp": float(timestamp),
                     "lat": pos[0],
                     "lon": pos[1],
                     "alt": _fix_altitude(fix),

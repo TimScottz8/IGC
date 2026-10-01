@@ -332,9 +332,15 @@ class FlightRenderController(QObject):
         self.window.track_item.setData([], [])
         self.window.flown_track_item.setData([], [])
         self.window.marker_item.setData([], [])
+        self.window._clear_visible_flight_markers()
         for item in self.window.extra_track_items:
             self.window.plot_widget.removeItem(item)
         self.window.extra_track_items = []
+        self.window.active_flight_render_data = []
+        self.window.track_utc_timestamps = []
+        self.window.playback_start_utc_s = None
+        self.window.playback_end_utc_s = None
+        self.window.sim_elapsed_seconds = 0.0
         self.window.track_time_offsets = []
         self.window.play_button.setEnabled(False)
         self.window.pause_button.setEnabled(False)
@@ -437,6 +443,7 @@ class FlightRenderController(QObject):
             self._render_loaded_record(records[0], active_records=active_records or records)
 
     def _render_loaded_record(self, record: FlightRecord, active_records: list | None = None) -> None:
+        prior_utc_time = self.window.current_utc_time_s
         self.window.timer.stop()
         self.window.last_tick_monotonic = None
         self.window.status_controller.loading_file()
@@ -466,47 +473,37 @@ class FlightRenderController(QObject):
                 self.window.status_controller.no_valid_fixes()
                 return
 
-            self.window._clear_visible_flight_markers()
             self.window.timeline = TimelineState.from_flight(record)
             self.window._configure_projection(self.window.track_lons, self.window.track_lats)
             self.window.track_xs, self.window.track_ys = self.window._project_lon_lat_lists(self.window.track_lons, self.window.track_lats)
             self.window.track_time_offsets = self.window.timeline.time_offsets
-
-            for item in self.window.extra_track_items:
-                self.window.plot_widget.removeItem(item)
-            self.window.extra_track_items = []
-
-            preserve_elapsed = self.window.track_xs and (self.window.sim_elapsed_seconds > 0 or self.window.current_index > 0)
-            prior_elapsed = self.window.sim_elapsed_seconds
-            prior_index = self.window.current_index
-            if preserve_elapsed and self.window.track_time_offsets:
-                target_elapsed = min(max(prior_elapsed, 0.0), self.window.track_time_offsets[-1])
-                target_index = 0
-                for idx, offset in enumerate(self.window.track_time_offsets):
-                    if offset >= target_elapsed:
-                        target_index = idx
-                        break
-                else:
-                    target_index = len(self.window.track_time_offsets) - 1
-                self.window.current_index = target_index
-                self.window.sim_elapsed_seconds = target_elapsed
+            self.window._prepare_active_flight_render_data(record)
+            if prior_utc_time is not None and self.window.playback_start_utc_s is not None:
+                self.window.sim_elapsed_seconds = max(
+                    0.0,
+                    min(
+                        prior_utc_time - self.window.playback_start_utc_s,
+                        self.window._playback_duration_seconds(),
+                    ),
+                )
             else:
-                self.window.current_index = 0
                 self.window.sim_elapsed_seconds = 0.0
+            self.window._sync_primary_index_to_playback_time()
             self.window._render_track_view(use_recent_trail=False)
             self.window._render_gaggle_reference_zones()
             self.window._render_active_gaggles()
             self.window.plot_widget.enableAutoRange()
-            self.window.play_button.setEnabled(True)
+            self.window.play_button.setEnabled(
+                len(active_records) < 2
+                or (self.window._gaggle_clusters_ready and self.window._gaggle_thread is None)
+            )
             self.window.pause_button.setEnabled(True)
             self.window.reset_button.setEnabled(True)
             self.window.speed_combo.setEnabled(True)
             self.window.timeline_slider.setEnabled(True)
-            self.window.timeline_slider.setMaximum(max(0, len(self.window.track_xs) - 1))
-            self.window._set_timeline_slider_value(self.window.current_index)
-            self.window.timeline_label.setText(
-                f"Time: {self.window._format_seconds(self.window.sim_elapsed_seconds)} / {self.window._format_seconds(self.window.track_time_offsets[-1] if self.window.track_time_offsets else 0.0)}"
-            )
+            self.window.timeline_slider.setMaximum(int(self.window._playback_duration_seconds() + 0.999))
+            self.window._set_timeline_slider_value(round(self.window.sim_elapsed_seconds))
+            self.window._update_timeline_label()
             if len(active_records) == 1:
                 self.window.status_controller.rendered_static_track(len(self.window.track_lons))
             else:

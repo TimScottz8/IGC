@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import sys
 import time
+from bisect import bisect_left, bisect_right
 
 if not os.environ.get("QT_QPA_PLATFORM"):
     if os.environ.get("DISPLAY"):
@@ -209,6 +210,39 @@ class MainWindow(QMainWindow):
         contest_buttons.addWidget(self.download_contest_button)
         contest_buttons.addWidget(self.cancel_download_button)
         download_layout.addLayout(contest_buttons)
+
+        acquisition_buttons = QHBoxLayout()
+        self.add_contest_queue_button = QPushButton("Add URL to queue")
+        self.run_acquisition_queue_button = QPushButton("Run acquisition queue")
+        self.remove_queued_contests_button = QPushButton("Remove selected")
+        self.pause_acquisition_queue_button = QPushButton("Pause queue")
+        self.run_acquisition_queue_button.setEnabled(False)
+        self.remove_queued_contests_button.setEnabled(False)
+        self.pause_acquisition_queue_button.setEnabled(False)
+        self.add_contest_queue_button.clicked.connect(self.add_contest_to_queue)
+        self.run_acquisition_queue_button.clicked.connect(self.run_acquisition_queue)
+        self.remove_queued_contests_button.clicked.connect(self.remove_queued_contests)
+        self.pause_acquisition_queue_button.clicked.connect(self.pause_acquisition_queue)
+        acquisition_buttons.addWidget(self.add_contest_queue_button)
+        acquisition_buttons.addWidget(self.run_acquisition_queue_button)
+        acquisition_buttons.addWidget(self.remove_queued_contests_button)
+        acquisition_buttons.addWidget(self.pause_acquisition_queue_button)
+        download_layout.addLayout(acquisition_buttons)
+
+        download_layout.addWidget(QLabel("Contest acquisition queue"))
+        self.contest_acquisition_queue = QTableWidget(0, 2)
+        self.contest_acquisition_queue.setHorizontalHeaderLabels(["Contest", "Status"])
+        self.contest_acquisition_queue.verticalHeader().setVisible(False)
+        self.contest_acquisition_queue.setAlternatingRowColors(True)
+        self.contest_acquisition_queue.setSelectionBehavior(self.contest_acquisition_queue.SelectionBehavior.SelectRows)
+        self.contest_acquisition_queue.setSelectionMode(self.contest_acquisition_queue.SelectionMode.ExtendedSelection)
+        self.contest_acquisition_queue.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.contest_acquisition_queue.setMaximumHeight(115)
+        queue_header = self.contest_acquisition_queue.horizontalHeader()
+        queue_header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        queue_header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        download_layout.addWidget(self.contest_acquisition_queue)
+
         self.download_progress = QProgressBar()
         self.download_progress.setRange(0, 100)
         self.download_progress.setValue(0)
@@ -327,13 +361,24 @@ class MainWindow(QMainWindow):
             symbolPen="#d62728",
             symbolSize=10,
         )
+        self.active_flight_marker_item = pg.ScatterPlotItem(pxMode=True)
+        self.active_flight_marker_item.setZValue(3)
+        self.plot_widget.addItem(self.active_flight_marker_item)
         self.static_overlay_items: list = []
         self.extra_track_items: list = []
-        self.gaggle_overlay_items: list = []
+        self.active_flight_render_data: list[dict] = []
+        self._active_flight_marker_styles: list[dict] = []
+        self.gaggle_centroid_item = pg.ScatterPlotItem(pxMode=True)
+        self.gaggle_centroid_item.setZValue(5)
+        self.plot_widget.addItem(self.gaggle_centroid_item)
+        self.gaggle_member_item = pg.ScatterPlotItem(pxMode=True)
+        self.gaggle_member_item.setZValue(4)
+        self.plot_widget.addItem(self.gaggle_member_item)
+        self.gaggle_overlay_items: list = [self.gaggle_centroid_item, self.gaggle_member_item]
         self.gaggle_reference_items: list = []
         self.gaggle_clusters_raw: list[dict] = []
         self.gaggle_clusters: list[dict] = []
-        self.visible_flight_markers: list = []
+        self.visible_flight_markers: list = [self.active_flight_marker_item]
 
         self.secondary_plot_widget = self.plot_widget
 
@@ -475,6 +520,9 @@ class MainWindow(QMainWindow):
         self.track_xs: list[float] = []
         self.track_ys: list[float] = []
         self.track_time_offsets: list[float] = []
+        self.track_utc_timestamps: list[float] = []
+        self.playback_start_utc_s: float | None = None
+        self.playback_end_utc_s: float | None = None
         self.recent_track_seconds = 30.0
         self.timeline = None
         self.scene_state = SceneState()
@@ -717,6 +765,18 @@ class MainWindow(QMainWindow):
     def cancel_download(self) -> None:
         self.download_controller.cancel_download()
 
+    def add_contest_to_queue(self) -> None:
+        self.download_controller.add_current_contest_to_queue()
+
+    def run_acquisition_queue(self) -> None:
+        self.download_controller.start_acquisition_queue()
+
+    def remove_queued_contests(self) -> None:
+        self.download_controller.remove_selected_queued_contests()
+
+    def pause_acquisition_queue(self) -> None:
+        self.download_controller.pause_acquisition_queue()
+
     def download_contest(self) -> None:
         """Download the currently selected contest/class/day/flight subtree."""
         self.download_controller.start_download_contest()
@@ -735,6 +795,10 @@ class MainWindow(QMainWindow):
     def set_download_busy(self, is_busy: bool, *, allow_cancel: bool = False) -> None:
         self.discover_contest_button.setEnabled(not is_busy)
         self.download_contest_button.setEnabled(not is_busy and bool(self.contest_download_plan))
+        self.add_contest_queue_button.setEnabled(not is_busy)
+        self.run_acquisition_queue_button.setEnabled(not is_busy and self.contest_acquisition_queue.rowCount() > 0)
+        self.remove_queued_contests_button.setEnabled(not is_busy and self.contest_acquisition_queue.rowCount() > 0)
+        self.pause_acquisition_queue_button.setEnabled(is_busy and allow_cancel)
         self.cancel_download_button.setVisible(is_busy)
         self.cancel_download_button.setEnabled(is_busy and allow_cancel)
         self.contest_url_input.setEnabled(not is_busy)
@@ -749,6 +813,10 @@ class MainWindow(QMainWindow):
         self.cancel_flight_loading_button.setEnabled(is_busy and allow_cancel)
         self.discover_contest_button.setEnabled(not is_busy)
         self.download_contest_button.setEnabled(not is_busy and bool(self.contest_download_plan))
+        self.add_contest_queue_button.setEnabled(not is_busy)
+        self.run_acquisition_queue_button.setEnabled(not is_busy and self.contest_acquisition_queue.rowCount() > 0)
+        self.remove_queued_contests_button.setEnabled(not is_busy and self.contest_acquisition_queue.rowCount() > 0)
+        self.pause_acquisition_queue_button.setEnabled(is_busy and allow_cancel)
         self.contest_url_input.setEnabled(not is_busy)
         self.contest_results.setEnabled(not is_busy)
         self.local_contests.setEnabled(not is_busy)
@@ -762,20 +830,12 @@ class MainWindow(QMainWindow):
         self.static_overlay_items = []
 
     def _clear_visible_flight_markers(self) -> None:
-        for item in self.visible_flight_markers:
-            try:
-                self.plot_widget.removeItem(item)
-            except Exception:
-                pass
-        self.visible_flight_markers = []
+        self.active_flight_marker_item.setData(spots=[])
+        self.visible_flight_markers = [self.active_flight_marker_item]
 
     def _clear_gaggle_overlays(self) -> None:
-        for item in self.gaggle_overlay_items:
-            try:
-                self.plot_widget.removeItem(item)
-            except Exception:
-                pass
-        self.gaggle_overlay_items = []
+        self.gaggle_centroid_item.setData(spots=[])
+        self.gaggle_member_item.setData(spots=[])
 
     def _clear_gaggle_reference_overlays(self) -> None:
         for item in self.gaggle_reference_items:
@@ -1110,6 +1170,9 @@ class MainWindow(QMainWindow):
         }
 
     def _render_gaggle_reference_zones(self, *, restart_if_running: bool = False) -> None:
+        if self.timer.isActive():
+            self.pause_animation()
+
         flights = self.scene_state.active_flights
         if len(flights) < 2:
             self._reset_gaggle_display_state()
@@ -1156,6 +1219,7 @@ class MainWindow(QMainWindow):
 
         self._gaggle_thread = thread
         self._gaggle_worker = worker
+        self.play_button.setEnabled(False)
         thread.start()
 
     def _reset_gaggle_display_state(self) -> None:
@@ -1299,6 +1363,8 @@ class MainWindow(QMainWindow):
         if self._gaggle_pending_refresh:
             self._gaggle_pending_refresh = False
             self._render_gaggle_reference_zones()
+        else:
+            self.play_button.setEnabled(len(self.track_xs) > 1 and self._gaggle_clusters_ready)
 
     def _render_active_gaggles(self) -> None:
         self._clear_gaggle_overlays()
@@ -1308,7 +1374,9 @@ class MainWindow(QMainWindow):
         if not self.track_xs:
             return
 
-        current_time = self.track_time_offsets[self.current_index] if self.track_time_offsets else float(self.current_index)
+        current_time = self.current_utc_time_s
+        if current_time is None:
+            current_time = self.track_time_offsets[self.current_index] if self.track_time_offsets else float(self.current_index)
         if not self._gaggle_clusters_ready:
             if self._gaggle_thread is not None:
                 return
@@ -1324,9 +1392,11 @@ class MainWindow(QMainWindow):
         clusters = sorted(clusters, key=lambda item: int(item.get("size", 0)), reverse=True)
         clusters = clusters[: self.GAGGLE_MAX_ACTIVE_CLUSTERS]
 
-        member_xs: list[float] = []
-        member_ys: list[float] = []
-        member_seen: set[tuple[int, int]] = set()
+        member_positions: list[tuple[float, float]] = []
+        member_seen: set[tuple[float, float]] = set()
+        centroid_lons: list[float] = []
+        centroid_lats: list[float] = []
+        centroid_spots: list[dict] = []
         for cluster in clusters:
             cluster_end_ts = float(cluster.get("last_timestamp", cluster.get("timestamp", current_time)))
             cluster_age_s = max(0.0, current_time - cluster_end_ts)
@@ -1334,53 +1404,54 @@ class MainWindow(QMainWindow):
             strength = self._compute_cluster_strength(cluster, current_time)
             style = self._gaggle_strength_style(strength)
             centroid = cluster["centroid"]
-            xs, ys = self._project_lon_lat_lists([centroid["lon"]], [centroid["lat"]])
-            if not xs or not ys:
-                continue
-
             flight_count = len(cluster.get("zone_flight_ids") or self._cluster_flight_ids(cluster))
             visual_size = min(36.0, 10.0 + max(2, flight_count) * 3.0)
 
             base_color = pg.mkColor(style["color"]).getRgb()
             pen_alpha = int(255 * fade_ratio)
-            centroid_item = pg.ScatterPlotItem(
-                [xs[0]],
-                [ys[0]],
-                pen=pg.mkPen(color=(base_color[0], base_color[1], base_color[2], pen_alpha), width=2.2),
-                brush=pg.mkBrush(0, 0, 0, 0),
-                size=visual_size,
-                symbol="o",
-            )
-            centroid_item.setToolTip(
-                f"Thermal center | strength: {style['label']} ({strength:.2f}) | "
-                f"flights: {flight_count} | radius: {cluster.get('radius_m', 0.0):.0f} m | age: {cluster_age_s:.0f}s"
-            )
-            centroid_item.setZValue(5)
-            self.plot_widget.addItem(centroid_item)
-            self.gaggle_overlay_items.append(centroid_item)
+            centroid_lons.append(float(centroid["lon"]))
+            centroid_lats.append(float(centroid["lat"]))
+            centroid_spots.append({
+                "pen": pg.mkPen(color=(base_color[0], base_color[1], base_color[2], pen_alpha), width=2.2),
+                "brush": pg.mkBrush(0, 0, 0, 0),
+                "size": visual_size,
+                "symbol": "o",
+                "data": (
+                    f"Thermal center | strength: {style['label']} ({strength:.2f}) | "
+                    f"flights: {flight_count} | radius: {cluster.get('radius_m', 0.0):.0f} m | age: {cluster_age_s:.0f}s"
+                ),
+            })
 
             if cluster_age_s > self.GAGGLE_EVENT_CIRCLING_GRACE_S:
                 continue
 
             for member in cluster["members"]:
-                m_xs, m_ys = self._project_lon_lat_lists([member["lon"]], [member["lat"]])
-                if not m_xs or not m_ys:
-                    continue
-                key = (int(round(m_xs[0] * 1000.0)), int(round(m_ys[0] * 1000.0)))
+                lon = float(member["lon"])
+                lat = float(member["lat"])
+                key = (round(lon, 8), round(lat, 8))
                 if key in member_seen:
                     continue
                 member_seen.add(key)
-                member_xs.append(m_xs[0])
-                member_ys.append(m_ys[0])
-                if len(member_xs) >= self.GAGGLE_MAX_ACTIVE_MEMBER_POINTS:
+                member_positions.append((lon, lat))
+                if len(member_positions) >= self.GAGGLE_MAX_ACTIVE_MEMBER_POINTS:
                     break
-            if len(member_xs) >= self.GAGGLE_MAX_ACTIVE_MEMBER_POINTS:
+            if len(member_positions) >= self.GAGGLE_MAX_ACTIVE_MEMBER_POINTS:
                 break
 
-        if not member_xs:
+        centroid_xs, centroid_ys = self._project_lon_lat_lists(centroid_lons, centroid_lats)
+        for spot, x_value, y_value in zip(centroid_spots, centroid_xs, centroid_ys):
+            spot["pos"] = (x_value, y_value)
+        self.gaggle_centroid_item.setData(
+            spots=centroid_spots,
+            tip=lambda x_value, y_value, data: str(data),
+        )
+
+        if not member_positions:
             return
 
-        member_item = pg.ScatterPlotItem(
+        member_lons, member_lats = zip(*member_positions)
+        member_xs, member_ys = self._project_lon_lat_lists(list(member_lons), list(member_lats))
+        self.gaggle_member_item.setData(
             member_xs,
             member_ys,
             pen=pg.mkPen(color="#1f77b4", width=1.6),
@@ -1388,12 +1459,9 @@ class MainWindow(QMainWindow):
             size=8,
             symbol="o",
         )
-        member_item.setToolTip(
+        self.gaggle_member_item.setToolTip(
             f"Thermal members | shown points: {len(member_xs)}"
         )
-        member_item.setZValue(4)
-        self.plot_widget.addItem(member_item)
-        self.gaggle_overlay_items.append(member_item)
 
     def _add_overlay_line(self, lons: list[float], lats: list[float], color: str, width: int = 2) -> None:
         if not lons or not lats:
@@ -1502,11 +1570,18 @@ class MainWindow(QMainWindow):
             self._add_overlay_line([point[1] for point in join_points], [point[0] for point in join_points], color=color)
 
     def start_animation(self) -> None:
-        if len(self.track_xs) > 1:
-            self._hide_reference_zones_for_animation()
-            self._render_track_view(use_recent_trail=True)
-            self.last_tick_monotonic = time.monotonic()
-            self.timer.start()
+        if len(self.track_xs) <= 1:
+            return
+        if len(self.scene_state.active_flights) > 1 and (
+            self._gaggle_thread is not None or not self._gaggle_clusters_ready
+        ):
+            self.status_controller.set_text("Status: waiting for gaggle precomputation before playback")
+            return
+
+        self._hide_reference_zones_for_animation()
+        self._render_track_view(use_recent_trail=True)
+        self.last_tick_monotonic = time.monotonic()
+        self.timer.start()
 
     def pause_animation(self) -> None:
         self.timer.stop()
@@ -1517,10 +1592,15 @@ class MainWindow(QMainWindow):
     def reset_animation(self) -> None:
         self.timer.stop()
         self.last_tick_monotonic = None
+        self.sim_elapsed_seconds = 0.0
+        self._sync_primary_index_to_playback_time()
         self._show_reference_zones_when_static()
         if not self.track_lons:
             return
-        self.jump_to_index(0)
+        self._render_track_view(use_recent_trail=False)
+        self._render_active_gaggles()
+        self._set_timeline_slider_value(0)
+        self._update_timeline_label()
 
     def on_tick(self) -> None:
         if not self.track_xs:
@@ -1528,12 +1608,10 @@ class MainWindow(QMainWindow):
             self.last_tick_monotonic = None
             return
 
-        if self.current_index >= len(self.track_xs) - 1:
+        duration = self._playback_duration_seconds()
+        if duration <= 0:
             self.timer.stop()
             self.last_tick_monotonic = None
-            self._render_track_view(use_recent_trail=False)
-            self._show_reference_zones_when_static()
-            self.status_controller.playback_complete(len(self.track_xs), len(self.track_xs))
             return
 
         now = time.monotonic()
@@ -1543,17 +1621,20 @@ class MainWindow(QMainWindow):
 
         real_delta_seconds = max(0.0, now - self.last_tick_monotonic)
         self.last_tick_monotonic = now
-        self.sim_elapsed_seconds += real_delta_seconds * self.current_speed_multiplier()
-
-        target_index = self.current_index
-        last_index = len(self.track_time_offsets) - 1
-        while target_index < last_index and self.track_time_offsets[target_index + 1] <= self.sim_elapsed_seconds:
-            target_index += 1
-
-        self.current_index = target_index
+        self.sim_elapsed_seconds = min(
+            duration,
+            self.sim_elapsed_seconds + real_delta_seconds * self.current_speed_multiplier(),
+        )
+        self._sync_primary_index_to_playback_time()
         self._render_track_view(use_recent_trail=True)
         self._render_active_gaggles()
         self.status_controller.playback_frame(self.current_index + 1, len(self.track_xs))
+        if self.sim_elapsed_seconds >= duration:
+            self.timer.stop()
+            self.last_tick_monotonic = None
+            self._render_track_view(use_recent_trail=False)
+            self._show_reference_zones_when_static()
+            self.status_controller.playback_complete(len(self.track_xs), len(self.track_xs))
 
     def current_speed_multiplier(self) -> int:
         label = self.speed_combo.currentText().strip().lower()
@@ -1566,14 +1647,16 @@ class MainWindow(QMainWindow):
         return max(1, value)
 
     def _recent_track_indices(self, current_index: int) -> tuple[int, int]:
-        if not self.track_time_offsets:
+        timestamps = self.track_utc_timestamps
+        current_time = self.current_utc_time_s
+        if not timestamps or current_time is None:
             return max(0, current_index - 10), current_index
 
-        duration = max(self.track_time_offsets[-1], 1.0)
-        lookback_seconds = min(float(self.recent_track_seconds), duration)
-        window_points = max(2, int((lookback_seconds / duration) * max(len(self.track_time_offsets) - 1, 1)))
-        start_index = max(0, current_index - window_points)
-        return start_index, current_index
+        end_index = bisect_right(timestamps, current_time) - 1
+        if end_index < 0:
+            return 0, -1
+        start_index = bisect_left(timestamps, current_time - float(self.recent_track_seconds))
+        return start_index, min(end_index, len(timestamps) - 1)
 
     def _render_track_view(self, *, use_recent_trail: bool) -> None:
         if not self.track_xs:
@@ -1583,128 +1666,178 @@ class MainWindow(QMainWindow):
             self.track_item.setPen(pg.mkPen(color=self.ANIMATING_TRAIL_GHOST_PEN, width=2.0))
             self.flown_track_item.setPen(pg.mkPen(color=self.ANIMATING_TRAIL_PEN, width=2.8))
             start_index, end_index = self._recent_track_indices(self.current_index)
-            trail_xs = self.track_xs[start_index:end_index + 1]
-            trail_ys = self.track_ys[start_index:end_index + 1]
+            trail_xs = self.track_xs[start_index:end_index + 1] if end_index >= start_index else []
+            trail_ys = self.track_ys[start_index:end_index + 1] if end_index >= start_index else []
             self.track_item.setData(trail_xs, trail_ys)
             self.flown_track_item.setData(trail_xs, trail_ys)
         else:
             self.track_item.setPen(pg.mkPen(color=self.STATIC_FULL_ROUTE_PEN, width=1.5))
             self.flown_track_item.setPen(pg.mkPen(color=self.STATIC_FLOWN_ROUTE_PEN, width=2.6))
             self.track_item.setData(self.track_xs, self.track_ys)
+            current_time = self.current_utc_time_s
+            before_primary_start = bool(
+                self.track_utc_timestamps
+                and current_time is not None
+                and current_time < self.track_utc_timestamps[0]
+            )
             self.flown_track_item.setData(
-                self.track_xs[: self.current_index + 1],
-                self.track_ys[: self.current_index + 1],
+                [] if before_primary_start else self.track_xs[: self.current_index + 1],
+                [] if before_primary_start else self.track_ys[: self.current_index + 1],
             )
 
         self._render_extra_tracks(use_recent_trail=use_recent_trail)
-        self.marker_item.setData([self.track_xs[self.current_index]], [self.track_ys[self.current_index]])
+        current_time = self.current_utc_time_s
+        primary_has_started = (
+            not self.track_utc_timestamps
+            or current_time is None
+            or current_time >= self.track_utc_timestamps[0]
+        )
+        if primary_has_started:
+            self.marker_item.setData([self.track_xs[self.current_index]], [self.track_ys[self.current_index]])
+        else:
+            self.marker_item.setData([], [])
 
         if not self.scene_state.active_flights:
-            self._clear_visible_flight_markers()
+            self.active_flight_marker_item.setData(spots=[])
             return
 
-        colors = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b"]
-        self._clear_visible_flight_markers()
-        for index, flight in enumerate(self.scene_state.active_flights):
-            if not getattr(flight, "lons", None) or not getattr(flight, "lats", None):
+        marker_spots = []
+        current_time = self.current_utc_time_s
+        if current_time is None:
+            self.active_flight_marker_item.setData(spots=[])
+            return
+        for index, render_data in enumerate(self.active_flight_render_data):
+            xs = render_data["xs"]
+            ys = render_data["ys"]
+            timestamps = render_data["utc_timestamps"]
+            if not xs or not ys:
                 continue
-            fix_count = len(flight.lons)
-            if fix_count == 0:
+            active_index = bisect_right(timestamps, current_time) - 1
+            if active_index < 0:
                 continue
-            flight_timeline = TimelineState.from_flight(flight)
-            flight_offsets = flight_timeline.time_offsets
-            local_total = max(float(flight_timeline.total_seconds), 1.0)
-            active_index = 0
-            if len(flight_offsets) > 1 and self.sim_elapsed_seconds > 0:
-                active_index = min(
-                    len(flight_offsets) - 1,
-                    max(0, int((self.sim_elapsed_seconds / local_total) * (len(flight_offsets) - 1))),
-                )
-            lon = float(flight.lons[active_index]) if active_index < len(flight.lons) else float(flight.lons[-1])
-            lat = float(flight.lats[active_index]) if active_index < len(flight.lats) else float(flight.lats[-1])
-            px, py = self._project_lon_lat_lists([lon], [lat])
-            if not px or not py:
-                continue
-            item = pg.ScatterPlotItem(
-                [px[0]],
-                [py[0]],
-                pen=pg.mkPen(color=colors[index % len(colors)], width=2),
-                brush=pg.mkBrush(colors[index % len(colors)]),
-                size=8 if index > 0 else 10,
-                symbol="o",
-            )
-            self.plot_widget.addItem(item)
-            self.visible_flight_markers.append(item)
+            active_index = min(active_index, len(xs) - 1, len(ys) - 1)
+            marker_spots.append({
+                "pos": (xs[active_index], ys[active_index]),
+                **self._active_flight_marker_styles[index],
+            })
+        self.active_flight_marker_item.setData(spots=marker_spots)
 
-    def _render_extra_tracks(self, *, use_recent_trail: bool) -> None:
+    def _prepare_active_flight_render_data(self, primary_record) -> None:
         for item in self.extra_track_items:
             self.plot_widget.removeItem(item)
         self.extra_track_items = []
+        self.active_flight_render_data = []
+        self._active_flight_marker_styles = []
+        self._clear_visible_flight_markers()
 
-        active_flights = self.scene_state.active_flights
-        if len(active_flights) < 2:
-            return
-
+        active_flights = list(self.scene_state.active_flights)
+        active_flights = [primary_record, *(flight for flight in active_flights if flight is not primary_record)]
         colors = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b"]
-        for index, extra_record in enumerate(active_flights[1:], start=1):
-            if not getattr(extra_record, "lons", None) or not getattr(extra_record, "lats", None):
+
+        for index, flight in enumerate(active_flights):
+            lons = list(getattr(flight, "lons", []) or [])
+            lats = list(getattr(flight, "lats", []) or [])
+            if not lons or not lats:
                 continue
 
-            if use_recent_trail:
-                extra_timeline = TimelineState.from_flight(extra_record)
-                extra_offsets = extra_timeline.time_offsets
-                if not extra_offsets:
-                    continue
-                local_total = max(float(extra_timeline.total_seconds), 1.0)
-                local_index = 0
-                if len(extra_offsets) > 1 and self.sim_elapsed_seconds > 0:
-                    local_index = min(
-                        len(extra_offsets) - 1,
-                        max(0, int((self.sim_elapsed_seconds / local_total) * (len(extra_offsets) - 1))),
-                    )
-                window_points = max(
-                    2,
-                    int((float(self.recent_track_seconds) / local_total) * max(len(extra_offsets) - 1, 1)),
-                )
-                start_index = max(0, local_index - window_points)
-                lons = extra_record.lons[start_index:local_index + 1]
-                lats = extra_record.lats[start_index:local_index + 1]
+            if flight is primary_record:
+                xs, ys = self.track_xs, self.track_ys
+                flight_timeline = self.timeline
             else:
-                lons = extra_record.lons
-                lats = extra_record.lats
-
-            xs, ys = self._project_lon_lat_lists(lons, lats)
+                xs, ys = self._project_lon_lat_lists(lons, lats)
+                flight_timeline = TimelineState.from_flight(flight)
             if not xs or not ys:
                 continue
-            extra_pen = pg.mkPen(color=colors[(index - 1) % len(colors)], width=1.7)
-            if not use_recent_trail:
-                extra_pen = pg.mkPen(color=(*pg.mkColor(colors[(index - 1) % len(colors)]).getRgb()[:3], 90), width=1.1)
-            extra_item = self.plot_widget.plot(
-                xs,
-                ys,
-                pen=extra_pen,
+
+            self.active_flight_render_data.append({
+                "xs": xs,
+                "ys": ys,
+                "time_offsets": flight_timeline.time_offsets,
+                "utc_timestamps": flight_timeline.utc_timestamps,
+                "total_seconds": flight_timeline.total_seconds,
+            })
+            color = colors[index % len(colors)]
+            color_rgb = pg.mkColor(color).getRgb()[:3]
+            self.active_flight_render_data[-1]["static_pen"] = pg.mkPen(
+                color=(*color_rgb, 90),
+                width=1.1,
             )
-            self.extra_track_items.append(extra_item)
+            self.active_flight_render_data[-1]["animated_pen"] = pg.mkPen(color=color, width=1.7)
+            self._active_flight_marker_styles.append({
+                "pen": pg.mkPen(color=color, width=2),
+                "brush": pg.mkBrush(color),
+                "size": 10 if index == 0 else 8,
+                "symbol": "o",
+            })
+
+            if flight is not primary_record:
+                self.extra_track_items.append(
+                    self.plot_widget.plot([], [], pen=pg.mkPen(color=color, width=1.7))
+                )
+
+        timed_flights = [
+            render_data["utc_timestamps"]
+            for render_data in self.active_flight_render_data
+            if render_data["utc_timestamps"]
+        ]
+        self.track_utc_timestamps = (
+            self.active_flight_render_data[0]["utc_timestamps"]
+            if self.active_flight_render_data
+            else []
+        )
+        self.playback_start_utc_s = min((timestamps[0] for timestamps in timed_flights), default=None)
+        self.playback_end_utc_s = max((timestamps[-1] for timestamps in timed_flights), default=None)
+
+    def _render_extra_tracks(self, *, use_recent_trail: bool) -> None:
+        current_time = self.current_utc_time_s
+        for item, render_data in zip(self.extra_track_items, self.active_flight_render_data[1:]):
+            xs = render_data["xs"]
+            ys = render_data["ys"]
+            item.setPen(render_data["animated_pen"] if use_recent_trail else render_data["static_pen"])
+            if use_recent_trail:
+                timestamps = render_data["utc_timestamps"]
+                end_index = bisect_right(timestamps, current_time) - 1 if current_time is not None else -1
+                if end_index < 0:
+                    item.setData([], [])
+                    continue
+                start_index = bisect_left(timestamps, current_time - float(self.recent_track_seconds))
+                item.setData(xs[start_index:end_index + 1], ys[start_index:end_index + 1])
+            else:
+                item.setData(xs, ys)
 
     def jump_to_index(self, index: int) -> None:
         if not self.track_xs:
             return
 
         clamped_index = max(0, min(index, len(self.track_xs) - 1))
-        self.current_index = clamped_index
-        if self.track_time_offsets and clamped_index < len(self.track_time_offsets):
+        if self.track_utc_timestamps and self.playback_start_utc_s is not None:
+            self.sim_elapsed_seconds = max(
+                0.0,
+                self.track_utc_timestamps[clamped_index] - self.playback_start_utc_s,
+            )
+            self._sync_primary_index_to_playback_time()
+        elif self.track_time_offsets and clamped_index < len(self.track_time_offsets):
+            self.current_index = clamped_index
             self.sim_elapsed_seconds = self.track_time_offsets[clamped_index]
         else:
+            self.current_index = clamped_index
             self.sim_elapsed_seconds = float(clamped_index)
 
         self._render_track_view(use_recent_trail=self.timer.isActive())
         self._render_active_gaggles()
-        self._set_timeline_slider_value(clamped_index)
-        total_seconds = self.track_time_offsets[-1] if self.track_time_offsets else float(len(self.track_xs) - 1)
-        self.timeline_label.setText(
-            f"Time: {self._format_seconds(self.sim_elapsed_seconds)} / {self._format_seconds(total_seconds)}"
-        )
+        self._set_timeline_slider_value(round(self.sim_elapsed_seconds))
+        self._update_timeline_label()
         self.status_controller.playback_frame(clamped_index + 1, len(self.track_xs))
+
+    def jump_to_time_offset(self, elapsed_seconds: float) -> None:
+        duration = self._playback_duration_seconds()
+        self.sim_elapsed_seconds = max(0.0, min(float(elapsed_seconds), duration))
+        self._sync_primary_index_to_playback_time()
+        self._render_track_view(use_recent_trail=self.timer.isActive())
+        self._render_active_gaggles()
+        self._set_timeline_slider_value(round(self.sim_elapsed_seconds))
+        self._update_timeline_label()
+        self.status_controller.playback_frame(self.current_index + 1, len(self.track_xs))
 
     def on_timeline_slider_changed(self, value: int) -> None:
         if self.timeline_internal_update:
@@ -1713,7 +1846,7 @@ class MainWindow(QMainWindow):
             return
 
         was_running = self.timer.isActive()
-        self.jump_to_index(int(value))
+        self.jump_to_time_offset(float(value))
         if was_running:
             self.last_tick_monotonic = time.monotonic()
         else:
@@ -1758,6 +1891,31 @@ class MainWindow(QMainWindow):
         seconds = total_seconds % 60
         return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
+    @property
+    def current_utc_time_s(self) -> float | None:
+        if self.playback_start_utc_s is None:
+            return None
+        return self.playback_start_utc_s + float(self.sim_elapsed_seconds)
+
+    def _playback_duration_seconds(self) -> float:
+        if self.playback_start_utc_s is None or self.playback_end_utc_s is None:
+            return 0.0
+        return max(0.0, self.playback_end_utc_s - self.playback_start_utc_s)
+
+    def _sync_primary_index_to_playback_time(self) -> None:
+        current_time = self.current_utc_time_s
+        if not self.track_utc_timestamps or current_time is None:
+            self.current_index = max(0, min(self.current_index, len(self.track_xs) - 1))
+            return
+        index = bisect_right(self.track_utc_timestamps, current_time) - 1
+        self.current_index = max(0, min(index, len(self.track_xs) - 1))
+
+    def _update_timeline_label(self) -> None:
+        self.timeline_label.setText(
+            f"Time: {self._format_seconds(self.sim_elapsed_seconds)} / "
+            f"{self._format_seconds(self._playback_duration_seconds())}"
+        )
+
     def _configure_projection(self, lons: list[float], lats: list[float]) -> None:
         center_lon = sum(lons) / len(lons)
         center_lat = sum(lats) / len(lats)
@@ -1770,13 +1928,11 @@ class MainWindow(QMainWindow):
         if self.geo_to_local is None:
             return lons, lats
 
-        xs: list[float] = []
-        ys: list[float] = []
-        for lon, lat in zip(lons, lats):
-            x_m, y_m = self.geo_to_local.transform(lon, lat)
-            xs.append(float(x_m) / 1000.0)
-            ys.append(float(y_m) / 1000.0)
-        return xs, ys
+        xs_m, ys_m = self.geo_to_local.transform(lons, lats)
+        return (
+            [float(x_m) / 1000.0 for x_m in xs_m],
+            [float(y_m) / 1000.0 for y_m in ys_m],
+        )
 
     def closeEvent(self, event) -> None:
         if self._gaggle_worker is not None:

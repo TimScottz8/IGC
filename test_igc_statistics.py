@@ -146,6 +146,10 @@ def test_contract_validation_and_export_are_deterministic(tmp_path: Path):
         skipped_day_count=0,
     )
 
+    assert day_1["late_starter_join_rate"] == 0.5
+    assert competition["median_late_starter_join_rate"] == 0.5
+    assert competition["iqr_late_starter_join_rate"] == 0.0
+
     manifest, checks = validate_contract_datasets(
         context=context,
         flight_rows=flights_day_1,
@@ -184,8 +188,10 @@ def test_contract_validation_and_export_are_deterministic(tmp_path: Path):
     assert manifest_json_1 == manifest_json_2
 
     parsed_manifest = json.loads(manifest_json_1)
+    parsed_day_rows = json.loads(day_json_1)
     assert parsed_manifest["contract_version"] == "1.0.0"
     assert parsed_manifest["checks_passed"] is True
+    assert parsed_day_rows[0]["late_starter_join_rate"] == 0.5
 
 
 def test_validation_catches_out_of_range_metrics():

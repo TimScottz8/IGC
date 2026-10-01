@@ -2,19 +2,34 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from flight_fix_utils import build_time_offsets
+from flight_fix_utils import build_time_offsets, fix_timestamp
 
 
 @dataclass
 class TimelineState:
     time_offsets: list[float] = field(default_factory=list)
+    utc_timestamps: list[float] = field(default_factory=list)
     index: int = 0
     total_seconds: float = 0.0
 
     @classmethod
     def from_flight(cls, flight_record) -> "TimelineState":
-        offsets = build_time_offsets(flight_record.fixes)
-        return cls(time_offsets=offsets, total_seconds=offsets[-1] if offsets else 0.0)
+        fixes = list(flight_record.fixes)
+        offsets = build_time_offsets(fixes)
+        utc_timestamps: list[float] = []
+        for fix in fixes:
+            timestamp = fix_timestamp(fix)
+            if timestamp is None:
+                utc_timestamps = []
+                break
+            if utc_timestamps and timestamp < utc_timestamps[-1]:
+                timestamp = utc_timestamps[-1]
+            utc_timestamps.append(timestamp)
+        return cls(
+            time_offsets=offsets,
+            utc_timestamps=utc_timestamps,
+            total_seconds=offsets[-1] if offsets else 0.0,
+        )
 
     def set_index(self, value: int) -> None:
         if not self.time_offsets:

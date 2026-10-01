@@ -21,8 +21,9 @@ def process_download_selection(
     *,
     base_dir: str | None = None,
     cancel_callback=None,
+    progress_callback=None,
 ) -> list[dict[str, str | int | float | None]]:
-    """Process a selection and return per-item download results in index order."""
+    """Process a selection, report completed items, and return results in index order."""
     if cancel_callback is None:
         cancel_callback = lambda: False
 
@@ -64,6 +65,8 @@ def process_download_selection(
                 break
             result = future.result()
             result_by_index[int(result["index"])] = result
+            if progress_callback is not None:
+                progress_callback(result)
 
     ordered = []
     for index in range(1, total + 1):

@@ -392,6 +392,29 @@ def discover_class_pages(contest_html: str, contest_url: str, base: str, sess):
 def find_candidates(html, base):
     s = BeautifulSoup(html, "html.parser")
     candidates = set()
+    base_host = (urlparse(base).hostname or "").lower()
+
+    def decode_html_fragment(value: str) -> str:
+        decoded = str(value)
+        for _ in range(8):
+            next_decoded = unescape(decoded)
+            if next_decoded == decoded:
+                break
+            decoded = next_decoded
+        return decoded
+
+    def add_contextual_anchor(anchor) -> None:
+        label = anchor.get_text(" ", strip=True).casefold()
+        if "download igc" not in label:
+            return
+        candidate_url = urljoin(base, str(anchor["href"]).strip())
+        parsed_candidate = urlparse(candidate_url)
+        candidate_host = (parsed_candidate.hostname or "").lower()
+        if candidate_host != base_host:
+            return
+        if not re.search(r"/download-contest-flight/\d+-\d+/?$", parsed_candidate.path, re.IGNORECASE):
+            return
+        candidates.add(canonical_url(candidate_url))
 
     def add_candidate(raw):
         if not raw:
@@ -412,8 +435,15 @@ def find_candidates(html, base):
             add_candidate(txt)
             for m in re.findall(r'href=["\']([^"\']+)["\']', unescape(txt)):
                 add_candidate(m)
+            if "download" in txt.casefold() and "igc" in txt.casefold():
+                fragment = BeautifulSoup(decode_html_fragment(txt), "html.parser")
+                for anchor in fragment.find_all("a", href=True):
+                    add_contextual_anchor(anchor)
 
     for match in re.finditer(r'(?:href|src)=(?:["\'])?([^\s"\'>]+)', unescape(html)):
         add_candidate(match.group(1))
+
+    for anchor in s.find_all("a", href=True):
+        add_contextual_anchor(anchor)
 
     return sorted(candidates)

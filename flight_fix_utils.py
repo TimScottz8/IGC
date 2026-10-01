@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any
 
 
@@ -10,6 +11,8 @@ def fix_timestamp(fix: Any) -> float | None:
     try:
         return float(value)
     except (TypeError, ValueError):
+        if isinstance(value, datetime) and value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc).timestamp()
         timestamp_fn = getattr(value, "timestamp", None)
         if callable(timestamp_fn):
             try:

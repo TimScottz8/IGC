@@ -5,6 +5,37 @@ Canonical overview:
 - `Pathway.md` describes the long-term analysis direction
 - `resume.md` is the handoff guide for the next working session
 
+## Update 2026-10-01
+
+### Completed
+- Added a persistent SoaringSpot multi-contest acquisition queue with serial contest processing, pause-after-contest, restart recovery, and per-file progress callbacks.
+- Fixed contest discovery for escaped `Download IGC` anchors on public class/day result pages. Live discovery of `57-hww` returned 377 candidates across 16 class/day groups; a real candidate returned an IGC payload.
+- Verified downloaded files on disk: 362 under `57 Hww` and 146 under `58 Hww`.
+- Reduced multi-flight playback work by caching projected coordinates and timelines and reusing track, marker, and gaggle graphics items. After the UTC-clock change, a synthetic 50-flight, 100-fix-per-flight benchmark measured 3.91 ms p95 / 4.91 ms max across 200 frames; the real 22-flight `58 Hww` day measured 0.84 ms mean / 1.19 ms p95 / 1.48 ms max over 8 seconds of playback.
+- Fixed cross-flight timestamp alignment: gaggle event timestamps retain absolute UTC, and multi-flight playback uses a shared cohort UTC interval instead of aligning every trace's first fix to zero.
+- Kept gaggle detection precomputed: playback filters cached events by UTC first/last timestamps; multi-flight playback waits for detection to finish.
+- Added regression coverage for staggered UTC starts, event timestamp visibility, cohort playback bounds, continuing beyond the primary flight's final fix, 50-flight rendering, and incremental download progress.
+
+### IGC Time Contract
+- The IGC B-record `HHMMSS` is UTC; HFDTE supplies the UTC date for the first valid B fix. The application does not adjust these timestamps.
+- Launch onset is separately inferred at the first valid speed sample above 30 kt.
+- Race start is separately defined as the last exit from the start zone before the pilot proceeds to the first turning point.
+- See `IMPLEMENTATION_SPEC.md`, "IGC Time And Start Semantics", and the [IGC format reference](https://xp-soaring.github.io/igc_file_format/igc_format_2008.html).
+
+### Validation
+- `.venv/bin/python -m pytest -q test_gaggle_analysis.py` (6 passed)
+- `QT_QPA_PLATFORM=offscreen .venv/bin/python -m pytest -q test_geo_task.py -k 'multi_flight_playback_uses_shared_utc_range_and_staggered_fixes or reuses_render_state_for_fifty_active_flights or animation_waits_until_gaggle_events_are_precomputed or gaggle_circles_follow_cached_event_timestamps_without_recomputing'` (4 passed)
+- `.venv/bin/python -m pytest -q test_contest_dataset.py -k reports_each_completed_file_before_returning` (1 passed)
+- Python editor diagnostics: no errors in changed modules.
+
+### Next Session
+1. Implement and test launch-onset derivation from the >30 kt speed rule, preserving source UTC fix times.
+2. Implement and test race-start derivation from the last start-zone exit followed by progress to the first turning point.
+3. Wire the derived UTC start events and gaggle events into flight/day/competition summary generation and exports.
+4. Keep future 3D playback on the same shared UTC scene clock.
+
+Read `resume.md` first for the detailed restart sequence and current caveats.
+
 ## Update 2026-09-15
 
 ### Completed today
