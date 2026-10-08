@@ -105,6 +105,29 @@ Recent smoke checks:
 - SoaringSpot remains a rate-limited host; the implemented policy is to keep requests conservative and serial
 
 ## Next Session Priority
+
+### Priority 0: Simplify and refactor (do this first, before new analysis work)
+Assessment on 2026-10-08: about 5,500 lines of non-test Python in about 30 modules, with specific problems rather than general bloat. One commit per step; keep tests as the safety net.
+
+Findings:
+- `map_helpers.py` (608 lines) is Streamlit/Plotly-era code imported only by tests (`GliderTrace`, `render_igc_map`, `plot_traces_on_map`). Needs confirmation that the Streamlit path is finished.
+- `igc_statistics.py` (505 lines) and `contest_dataset.py` (145 lines) are imported only by their own tests and are not wired into the app. Fold into the database design or delete.
+- `qt_app.py` is 1,957 lines with about 100 methods in one class.
+- `test_geo_task.py` is 1,063 lines with 48 tests in one class (geometry, UI, downloads, playback); 12 fail on the previous commit and the full suite can crash with a Qt bus error. Cause of the 12 failures not yet investigated.
+- About 20 definitions are referenced nowhere else (heuristic scan): `plot_traces_on_map`, `render_igc_map`, `fixes_in_zone`, `active_thermal_gaggles`, `get_records`, `dedupe_contest_links`, `request_with_diagnostics`, `filter_by_era`, `summary_rows`, and four helpers in `qt_app.py` (`_load_records_for_paths`, `_set_empty_track_state`, `_iter_downloaded_contest_paths`, `_selected_local_flight_paths`). Verify each before deleting.
+- 12 markdown files (about 2,250 lines) overlap: `Progress.md`, `resume.md`, `PR_DESCRIPTION.md`, `implementation_checklist.md`, `multi_contest_analysis_plan.md`, `MIGRATION_NOTES_2026-08-26.md`.
+- No package layout, `pyproject.toml`, linter or CI. Duplicate function names are not a problem (only `main`).
+
+Steps:
+1. Green baseline: find why the 12 `test_geo_task.py` tests fail, fix or quarantine them, then split the file by area (geometry, UI, downloads, playback).
+2. Delete dead code: `map_helpers.py` and its tests (and `plotly`/`pandas` if nothing else needs them), the unreferenced functions above, and decide the fate of `igc_statistics.py` and `contest_dataset.py`.
+3. Package and tooling: `src/` package with layers (parsing, start and finish detection, gaggle analysis, storage, UI), `pyproject.toml`, `ruff`, and a GitHub Actions test run.
+4. Split `qt_app.py` into widgets and controllers (largest and riskiest; last).
+5. Merge the notes into `README.md`, `IMPLEMENTATION_SPEC.md` and one handoff file; delete the rest.
+
+Questions to settle with the user first: is the Streamlit/Plotly path finished; is the `src/` layout change acceptable (it touches every import).
+
+### Then, in order
 1. Get the SoaringSpot URLs for Husbands Bosworth 2026 and WGC 2021 Club, then run `analysis_db.py fetch-official <url> <folder>` for each and re-run `check`.
 2. Implement finish detection (line or ring, SC3A 7.8) as the fallback for flights without an official finish; store it in the database.
 3. Tag gaggles pre-start/post-start per the "Gaggle Phase Tagging" rules in `IMPLEMENTATION_SPEC.md`: drop post-finish segments, store a started flag per member per snapshot, derive the tag per scope (class and all gliders).
@@ -114,4 +137,4 @@ Recent smoke checks:
 ## Resume Prompt
 Use this to restart quickly:
 
-“Resume from [resume.md](resume.md) and [IMPLEMENTATION_SPEC.md](IMPLEMENTATION_SPEC.md). Start detection (`start_detection.py`) and the SQLite store (`analysis_db.py`) are done. Next: load official times for the remaining contests, add finish detection, then tag gaggles pre/post start. Never rebase IGC UTC fix times per flight; playback and gaggle events share the cohort UTC axis.”
+“Resume from [resume.md](resume.md) and [IMPLEMENTATION_SPEC.md](IMPLEMENTATION_SPEC.md). Start with Priority 0 in resume.md (simplify and refactor: green test baseline, delete dead code, then packaging). Start detection (`start_detection.py`) and the SQLite store (`analysis_db.py`) are done. After the cleanup: load official times for the remaining contests, add finish detection, then tag gaggles pre/post start. Never rebase IGC UTC fix times per flight; playback and gaggle events share the cohort UTC axis.”
