@@ -9,12 +9,17 @@ from sector_geometry import (
     _unit_vector_bearing,
     build_sector_points,
     build_sector_split_points,
-    extract_glider_start_time,
     format_human_readable_datetime,
     is_point_in_sector,
     project_geometry_table,
     project_point_from_bearing,
     segment_crosses_sector,
+)
+from start_detection import (
+    StartResult,
+    detect_start,
+    extract_glider_start_time,
+    pev_timestamps_from_igc,
 )
 from task_parsing import (
     _find_sector_by_idx,
@@ -55,6 +60,9 @@ __all__ = [
     "segment_crosses_sector",
     "format_human_readable_datetime",
     "extract_glider_start_time",
+    "detect_start",
+    "pev_timestamps_from_igc",
+    "StartResult",
     "build_sector_points",
     "build_sector_split_points",
     "project_geometry_table",

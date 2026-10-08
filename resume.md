@@ -48,7 +48,7 @@ The current working state includes both the earlier multi-competition analysis w
 ## IGC Time Rules
 - IGC B-record time is UTC `HHMMSS`; HFDTE gives the UTC date of the first valid B-record fix. Do not adjust or per-flight-normalize these timestamps for cross-flight comparison.
 - Reference: [IGC 2008 format guide](https://xp-soaring.github.io/igc_file_format/igc_format_2008.html), sections 2.4, 2.5.4, and 4.1; [FAI/IGC 2023 specification](https://xp-soaring.github.io/igc_file_format/igc_fr_specification_with_al8_2023-2-1_0.pdf).
-- Keep **launch onset** and **race start** distinct. Launch onset is the first valid ground-speed sample above 30 kt. Race start is the last exit from the start zone before proceeding to the first turning point.
+- Keep **launch onset** and **race start** distinct. Launch onset is the first valid ground-speed sample above 30 kt. Race start follows FAI SC3 Annex A para 7.4 (last valid line crossing, or last PEV/exit for a cylinder start); see `IMPLEMENTATION_SPEC.md`, "Race Start Rules".
 - Preserve all fix times on the UTC axis, including ground/pre-launch fixes. Derived event times use the same UTC basis.
 - `gaggle_analysis.compute_thermal_gaggles()` emits absolute UTC event times. `TimelineState.utc_timestamps` retains per-fix absolute timestamps alongside relative duration offsets. The Qt cohort clock uses the minimum/maximum UTC bounds across selected flights.
 
@@ -75,7 +75,9 @@ Read these first when resuming:
 - [flight_model.py](flight_model.py)
 - [analysis_setup.py](analysis_setup.py)
 - [igc_statistics.py](igc_statistics.py)
-
+- [start_detection.py](start_detection.py)
+- [official_results.py](official_results.py)
+- [analysis_db.py](analysis_db.py)
 ## Verification Baseline
 Most recent focused validation:
 - `.venv/bin/python -m pytest -q test_gaggle_analysis.py` (6 passed)
@@ -93,20 +95,23 @@ Recent smoke checks:
 ## Known Risks / Notes
 - full Qt-heavy suite can intermittently crash in this environment with SIGSEGV; rely on focused tests plus smoke checks for iterative changes
 - parser multi-core mode currently has thresholding to avoid overhead on small batches
-- derived launch-onset and race-start event calculation are not implemented yet; use the definitions in `IMPLEMENTATION_SPEC.md`
-- the current race-start rule is the final exit from the start zone before the track proceeds to the first turning point; this is not the first fix or the >30 kt launch event
+- derived launch-onset calculation is not implemented yet; race start is implemented in `start_detection.py` and stored with official times in `igc_downloads/igc_analysis.sqlite` (build with `.venv/bin/python analysis_db.py build`)
+- official SoaringSpot start times are only loaded for `57 Hww` and `58 Hww`; Husbands Bosworth 2026 and WGC 2021 need their contest URLs for `analysis_db.py fetch-official`
+- 120 downloaded files have no start OZ in the IGC, so they have no detected start; 77 flights have no start from either source
+- `test_geo_task.py` has 12 failures that also fail on the previous commit, and the full suite can crash with a Qt bus error; run the focused suites instead
+- do not run an editor edit and a terminal write on the same file in one parallel batch (editor buffer and disk diverge)
 - multi-flight timing must remain on absolute UTC; per-flight `time_offsets` are only for individual-flight durations, never cross-flight alignment
 - low CPU utilization can still be normal when most selected flights are cache hits
 - SoaringSpot remains a rate-limited host; the implemented policy is to keep requests conservative and serial
 
 ## Next Session Priority
-1. Inspect `geo_task.py` start-zone/first-turnpoint geometry and existing `extract_glider_start_time()` behavior.
-2. Derive launch onset as the first valid >30 kt ground-speed sample; do not alter IGC UTC timestamps.
-3. Derive race start as the final start-zone exit followed by progress to the first turning point; add tests for repeated zone exits, missing task geometry, and no valid start.
-4. Carry both derived event timestamps in absolute UTC into per-flight metrics, then wire day/competition summaries into the export pipeline.
-5. Benchmark multi-contest acquisition after these analysis changes; defer 3D renderer choice until the shared UTC scene contract is stable.
+1. Get the SoaringSpot URLs for Husbands Bosworth 2026 and WGC 2021 Club, then run `analysis_db.py fetch-official <url> <folder>` for each and re-run `check`.
+2. Implement finish detection (line or ring, SC3A 7.8) as the fallback for flights without an official finish; store it in the database.
+3. Tag gaggles pre-start/post-start per the "Gaggle Phase Tagging" rules in `IMPLEMENTATION_SPEC.md`: drop post-finish segments, store a started flag per member per snapshot, derive the tag per scope (class and all gliders).
+4. Add the gaggle event, member and metrics tables to `analysis_db.py`, plus per-flight mean climb rate as a weather proxy.
+5. Wire day and competition summaries into the export pipeline; defer 3D renderer choice until the shared UTC scene contract is stable.
 
 ## Resume Prompt
 Use this to restart quickly:
 
-“Resume from [resume.md](resume.md) and [IMPLEMENTATION_SPEC.md](IMPLEMENTATION_SPEC.md). First implement and test UTC launch-onset (>30 kt) and race-start (last start-zone exit followed by progress to TP1) derivation. Never rebase IGC UTC fix times per flight; playback and gaggle events share the cohort UTC axis.”
+“Resume from [resume.md](resume.md) and [IMPLEMENTATION_SPEC.md](IMPLEMENTATION_SPEC.md). Start detection (`start_detection.py`) and the SQLite store (`analysis_db.py`) are done. Next: load official times for the remaining contests, add finish detection, then tag gaggles pre/post start. Never rebase IGC UTC fix times per flight; playback and gaggle events share the cohort UTC axis.”

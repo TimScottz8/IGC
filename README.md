@@ -53,7 +53,10 @@ Key files:
 - `scene_state.py` - selected and active flight state
 - `timeline_state.py` - playback timeline state
 - `gaggle_analysis.py` - thermal/gaggle detection logic
-- `geo_task.py` and `sector_geometry.py` - task parsing, sectors, and start-time logic
+- `geo_task.py` and `sector_geometry.py` - task parsing, sectors, and geometry
+- `start_detection.py` - race start detection (FAI SC3 Annex A 7.4) and official-versus-detected resolution
+- `official_results.py` - official start/finish times scraped from SoaringSpot results
+- `analysis_db.py` - SQLite store for flights, official and detected starts (`build`, `fetch-official`, `resolve`, `check`)
 - `test_geo_task.py` and `test_gaggle_analysis.py` - regression coverage for the current behaviour
 
 ## Typical Workflow
@@ -95,6 +98,7 @@ Longer term:
 ```bash
 QT_QPA_PLATFORM=offscreen .venv/bin/python -m pytest -q test_geo_task.py
 .venv/bin/python -m pytest -q test_gaggle_analysis.py
+.venv/bin/python -m pytest -q test_start_detection.py test_official_results.py test_analysis_db.py
 ```
 
 ## Project History

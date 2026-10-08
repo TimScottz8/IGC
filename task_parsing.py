@@ -75,6 +75,20 @@ def _parse_oz_records(path: str):
     return records
 
 
+def extract_pev_times_from_igc(path: str) -> list[int]:
+    """Return PEV event times (UTC seconds of day) from the file's E records."""
+    if not os.path.exists(path):
+        return []
+    times: list[int] = []
+    with open(path, "r", encoding="ISO-8859-1") as fh:
+        for raw_line in fh:
+            match = re.match(r"E(\d{2})(\d{2})(\d{2})PEV", raw_line)
+            if match:
+                hours, minutes, seconds = (int(part) for part in match.groups())
+                times.append(hours * 3600 + minutes * 60 + seconds)
+    return sorted(times)
+
+
 def _task_point_from_oz_record(idx: int, record: dict):
     """Build the waypoint dictionary for one OZ task point record."""
     lat = record.get("lat")

@@ -51,9 +51,37 @@ Cross-flight analysis and playback use one shared UTC time axis. Gaggle event `t
 
 Launch and race start are separate derived events:
 - **Launch onset:** the first valid fix whose calculated ground speed exceeds 30 kt (approximately 15.43 m/s). This is an analysis heuristic, not a correction to IGC timestamps.
-- **Race start:** the last exit from the task start zone before the track proceeds to the first turning point. Do not substitute the first recorded fix or launch onset for race start.
+- **Race start:** defined by FAI SC3 Annex A para 7.4 (see "Race Start Rules" below). Do not substitute the first recorded fix or launch onset for race start.
 
 Keep all recorded fixes, including pre-launch ground fixes, on their original UTC timeline. Derived launch and race-start timestamps must retain that same UTC basis. If timestamps or task geometry are insufficient to derive an event, mark it unavailable rather than shifting the flight clock.
+
+### Race Start Rules
+
+Source: FAI SC3 Annex A (2024), para 7.4. Implemented in `start_detection.py`.
+
+- The start-zone type comes from the task's start OZ in the IGC file. A full cylinder uses the Cylinder Start rule. A line (`Line=1`) or semi-cylinder (half-angle below 180 degrees) uses the Line Start rule.
+- **Line start:** the start line is perpendicular to the course to the first turnpoint, centred on the start point, with half-length equal to the OZ radius. Start time is the last crossing in the course direction before the first turnpoint is reached, linearly interpolated between fixes and rounded to the nearest second. Reverse crossings are ignored.
+- **Cylinder start:** start time is the last PEV (E record) pressed inside the cylinder, with PEVs within 30 s counted as one at the first press. With no PEV, it is the last cylinder exit.
+- Every valid candidate start is kept (`StartResult.candidates`), not only the last.
+- Spherical earth, radius 6371 km, per the Annex preliminary remarks.
+- The start-gate open time is not in the IGC file and is not yet applied.
+
+### Start Time Resolution
+
+SoaringSpot daily results give each pilot's scored start in local clock time. `analysis_db.py` stores these in `start_official`, infers the whole-hour UTC offset per contest day from the median difference against detected starts (the IGC `HFTZN` header is unreliable), and fills `start_resolved`:
+
+- Official start is used when it lies within 20 s of a detected candidate.
+- The detected start is used when three or more pilots in a class-day share the same official time (gate-time reporting, e.g. Dosi), or when the official time matches no detected candidate.
+- If only one source exists it is used; if neither, the flight has no start.
+
+### Gaggle Phase Tagging (decided, not yet implemented)
+
+- Phases: pre-start and post-start. Post-finish gaggling is ignored: thermal segments after a flight's finish are dropped before clustering.
+- A gaggle snapshot is post-start if any member in scope has started; otherwise pre-start. The tag is derived per scope, so store a started flag per member per snapshot.
+- Scopes: per class, and all gliders in the competition.
+- Keep started and not-yet-started member counts on each snapshot.
+- Race gaggle size is reported as a proportion of pilots on course. The exposure ratio uses racing time as its denominator.
+- Finish time comes from the official result, with detected finish (line or ring, 7.8) as the fallback. Finish detection is not yet implemented.
 
 ## Canonical Gaggle Model
 

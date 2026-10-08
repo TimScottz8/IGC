@@ -22,7 +22,6 @@ from geo_task import (
     _outward_bisector_from_legs,
     build_sector_points,
     build_sector_split_points,
-    extract_glider_start_time,
     extract_task_sectors_from_igc,
     format_human_readable_datetime,
     is_point_in_sector,
@@ -1020,34 +1019,6 @@ class SectorGeometryTests(unittest.TestCase):
         self.assertFalse(is_point_in_sector(outside_lat, outside_lon, sector))
         self.assertFalse(is_point_in_sector(far_lat, far_lon, sector))
 
-
-    def test_extract_glider_start_time_ignores_post_tp1_start_sector_fixes(self):
-        start_sector = {
-            "lat": 0.0,
-            "lon": 0.0,
-            "radius_m": 1000.0,
-            "inner_radius_m": 0.0,
-            "a1_deg": 45.0,
-            "orientation_deg": 90.0,
-        }
-        tp1_sector = {
-            "lat": 0.0,
-            "lon": 0.02,
-            "radius_m": 1000.0,
-            "inner_radius_m": 0.0,
-            "a1_deg": 45.0,
-            "orientation_deg": 90.0,
-        }
-
-        start_fix_1 = {"lat": 0.0, "lon": 0.0, "timestamp": "2024-01-01T10:00:00Z"}
-        tp1_fix = {"lat": 0.0, "lon": 0.025, "timestamp": "2024-01-01T10:01:00Z"}
-        start_fix_2 = {"lat": 0.0, "lon": 0.0, "timestamp": "2024-01-01T10:02:00Z"}
-
-        fixes = [start_fix_1, tp1_fix, start_fix_2]
-        self.assertEqual(
-            extract_glider_start_time(fixes, start_sector, tp1_sector),
-            "2024-01-01T10:00:00Z",
-        )
 
     def test_point_in_sector_counts_inner_radius_as_valid_for_inclusive_envelope(self):
         sector = {

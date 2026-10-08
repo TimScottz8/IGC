@@ -11,11 +11,12 @@ from typing import Any
 import libigc
 
 from geo_task import (
+    detect_start,
     extract_finish_sector_from_igc,
-    extract_glider_start_time,
     extract_start_sector_from_igc,
     extract_task_points_from_igc,
     extract_task_sectors_from_igc,
+    pev_timestamps_from_igc,
 )
 
 
@@ -48,6 +49,7 @@ class FlightRecord:
     start_sector: dict[str, Any] | None = None
     finish_sector: dict[str, Any] | None = None
     start_time: str | None = None
+    start_detail: dict[str, Any] | None = None
     valid: bool = False
 
     @classmethod
@@ -72,7 +74,12 @@ class FlightRecord:
             if turnpoint_sectors
             else None
         )
-        start_time = extract_glider_start_time(flight.fixes, start_sector, first_turnpoint_sector)
+        start_result = detect_start(
+            flight.fixes,
+            start_sector,
+            first_turnpoint_sector,
+            pev_timestamps_from_igc(file_path, flight.fixes),
+        )
 
         return cls(
             file_path=file_path,
@@ -82,7 +89,8 @@ class FlightRecord:
             task_sectors=task_sectors,
             start_sector=start_sector,
             finish_sector=finish_sector,
-            start_time=start_time,
+            start_time=start_result.timestamp,
+            start_detail=start_result.to_dict(),
             valid=True,
         )
 
@@ -143,6 +151,7 @@ def serialize_flight_record(file_path: str) -> dict[str, Any]:
         "start_sector": record.start_sector,
         "finish_sector": record.finish_sector,
         "start_time": record.start_time,
+        "start_detail": record.start_detail,
     }
 
 
@@ -204,6 +213,7 @@ def flight_record_from_payload(payload: dict[str, Any]) -> FlightRecord:
         start_sector=payload.get("start_sector"),
         finish_sector=payload.get("finish_sector"),
         start_time=payload.get("start_time"),
+        start_detail=payload.get("start_detail"),
         valid=valid,
     )
 

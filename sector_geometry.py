@@ -202,34 +202,6 @@ def format_human_readable_datetime(value):
     return str(value)
 
 
-def extract_glider_start_time(fixes, start_sector: dict | None, first_turnpoint_sector: dict | None = None):
-    """Track the last fix inside the start sector before the first turnpoint is reached."""
-    if not fixes or not start_sector:
-        return None
-
-    last_start_time = None
-    seen_turnpoint_1 = False
-
-    for fix in fixes:
-        lat = getattr(fix, "lat", None)
-        lon = getattr(fix, "lon", None)
-        timestamp = getattr(fix, "timestamp", None)
-        if isinstance(fix, dict):
-            lat = fix.get("lat", lat)
-            lon = fix.get("lon", lon)
-            timestamp = fix.get("timestamp", timestamp)
-        if lat is None or lon is None:
-            continue
-
-        if first_turnpoint_sector and is_point_in_sector(float(lat), float(lon), first_turnpoint_sector):
-            seen_turnpoint_1 = True
-
-        if not seen_turnpoint_1 and is_point_in_sector(float(lat), float(lon), start_sector):
-            last_start_time = timestamp
-
-    return last_start_time
-
-
 def build_sector_points(center_lat: float, center_lon: float, radius_m: float, start_angle_deg: float, end_angle_deg: float, points: int = 48, center_bearing_deg: float | None = None):
     """Build a polygon outline for a circular sector wedge used in the task overlay."""
     if radius_m <= 0:

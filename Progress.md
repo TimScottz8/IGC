@@ -5,6 +5,30 @@ Canonical overview:
 - `Pathway.md` describes the long-term analysis direction
 - `resume.md` is the handoff guide for the next working session
 
+## Update 2026-10-08
+
+### Completed
+- Replaced the fix-in-sector start heuristic with `start_detection.py`, following FAI SC3 Annex A para 7.4: last valid line crossing (interpolated to the second, in the course direction, before the first turnpoint), semicircle treated as a line, and last PEV or last exit for cylinder starts. All valid candidates are kept.
+- Added `official_results.py`, which scrapes the per-pilot Start and Finish times from SoaringSpot daily results pages (local clock time).
+- Added `analysis_db.py`, a SQLite store at `igc_downloads/igc_analysis.sqlite` with contests, class-days, flights, official and detected starts, all crossings, and the resolved start. CLI: `build`, `fetch-official`, `resolve`, `check`.
+- Resolution rule: official start when it matches a detected crossing within 20 s; detected start when the official time is shared by three or more pilots in a class-day or matches no crossing. The UTC offset is inferred per contest day because the IGC `HFTZN` header is unreliable.
+- Official times loaded for `57 Hww` and `58 Hww`; most flights match the official start to within 1 s. The Dosi class reports the gate time as every pilot's start.
+- Built the database from all 754 downloaded files: 359 official starts used, 183 detected only, 75 detected because of shared gate times, 56 official only, 2 detected because the official time matched no crossing, 77 with no start.
+- Decided the gaggle phase rules (see `IMPLEMENTATION_SPEC.md`, "Gaggle Phase Tagging"); not yet implemented.
+
+### Notes
+- This supersedes the earlier "last exit from the start zone" race-start definition below.
+- Race start for the 120 files with no start OZ comes only from the official results.
+
+### Validation
+- `test_start_detection.py`, `test_official_results.py` and `test_analysis_db.py` (28 passed); with the analysis, gaggle, statistics and selection suites, 45 passed.
+- `test_geo_task.py` shows the same 12 failures as the previous commit; one obsolete start-time test was removed.
+
+### Next Session
+1. Load official times for Husbands Bosworth 2026 and WGC 2021 Club once their SoaringSpot URLs are known.
+2. Implement finish detection (SC3A 7.8) as the fallback for flights without an official finish.
+3. Tag gaggles pre-start or post-start per scope (class and all gliders), ignoring post-finish gaggling.
+4. Add gaggle and metrics tables and a mean climb-rate weather proxy to the database.
 ## Update 2026-10-01
 
 ### Completed

@@ -49,13 +49,14 @@ MAP_LAYOUT_KEY = "mapbox" if hasattr(go, "Scattermapbox") else "map"
 
 from geo_task import (
     build_sector_split_points,
+    detect_start,
     extract_finish_sector_from_igc,
-    extract_glider_start_time,
     extract_start_sector_from_igc,
     extract_task_points_from_igc,
     extract_task_sectors_from_igc,
     format_human_readable_datetime,
     is_point_in_sector,
+    pev_timestamps_from_igc,
     segment_crosses_sector,
 )
 
@@ -125,7 +126,12 @@ class GliderTrace:
             and sector.get("idx") is not None
         ]
         first_turnpoint_sector = min(turnpoint_sectors, key=lambda sector: int(sector.get("idx", 10**9))) if turnpoint_sectors else None
-        self.start_time = extract_glider_start_time(self.flight.fixes, self.start_sector, first_turnpoint_sector)
+        self.start_time = detect_start(
+            self.flight.fixes,
+            self.start_sector,
+            first_turnpoint_sector,
+            pev_timestamps_from_igc(self.file_path, self.flight.fixes),
+        ).timestamp
 
         self._compute_zone_fix_mask()
 
